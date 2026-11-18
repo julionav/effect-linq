@@ -1,7 +1,9 @@
 import { Cause, DateTime, Effect, Exit, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { describe, expect, test } from "vite-plus/test";
-import { from, LinqError, quote, Sql, Table } from "../src/index.ts";
+import { LinqError, quote, Sql } from "../src/index.ts";
+import { from } from "../src/query.ts";
+import * as Table from "../src/table.ts";
 import { db, PgLive, Posts, type UserId, Users } from "./schema.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E, SqlClient>): Promise<A> =>

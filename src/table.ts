@@ -1,4 +1,5 @@
-import { Schema } from "effect";
+import { type Effect, Schema } from "effect";
+import type { Model } from "effect/schema";
 import { fail } from "./errors.ts";
 
 /** How a value behaves in JavaScript; drives operator translation. */
@@ -55,13 +56,78 @@ export interface Table<
   readonly primaryKey: ReadonlyArray<Column>;
   /** optimistic concurrency counter, see {@link TableOptions.version} */
   readonly version: Column | undefined;
+  /** set when the table was declared from a `Model.Class`, see {@link ModelTable} */
+  readonly model?: ModelInfo | undefined;
+  /** what the database needs to know to create the table, see `Migrations` */
+  readonly ddl?: TableDdl | undefined;
+}
+
+/** What a table declared from a `Model.Class` knows beyond its columns. */
+export interface ModelInfo {
+  /** rows are created with this prototype, so they are instances of the class */
+  readonly proto: object;
+  /** Fills in what the application generates on insert (ids, timestamps) and validates. */
+  readonly makeInsert: (
+    input: unknown,
+  ) => Effect.Effect<Record<string, unknown>, Schema.SchemaError>;
+  /** Columns refreshed on every update, such as `Model.DateTimeUpdate`, with their new value. */
+  readonly onUpdate: ReadonlyArray<{
+    readonly col: Column;
+    readonly make: Effect.Effect<unknown, Schema.SchemaError>;
+  }>;
+  /** columns the application may not set in an update */
+  readonly notUpdatable: ReadonlySet<string>;
+}
+
+export interface ColumnDdl {
+  /** the Postgres type, such as `text` or `numeric(12,2)` */
+  readonly type: string;
+  readonly defaultSql: string | undefined;
+  readonly identity: boolean;
+}
+
+export interface IndexDdl {
+  readonly name: string;
+  readonly columns: ReadonlyArray<string>;
+  readonly unique: boolean;
+}
+
+export interface ForeignKeyDdl {
+  readonly name: string;
+  readonly columns: ReadonlyArray<string>;
+  /** resolved lazily: the referenced table may be declared later */
+  readonly references: () => { readonly table: AnyTable; readonly columns: ReadonlyArray<string> };
+  readonly onDelete: "no action" | "restrict" | "cascade" | "set null" | "set default";
+}
+
+export interface TableDdl {
+  /** by property name */
+  readonly columns: { readonly [key: string]: ColumnDdl };
+  readonly indexes: ReadonlyArray<IndexDdl>;
+  readonly foreignKeys: ReadonlyArray<ForeignKeyDdl>;
+}
+
+/** A table declared from a `Model.Class`: rows are instances, and writes follow its variants. */
+export interface ModelTable<Name extends string, M extends Model.Any> extends Table<
+  Name,
+  M["fields"] & Fields,
+  never
+> {
+  readonly "~model"?: M;
 }
 
 export type AnyTable = Table<string, any, any>;
 
+type ModelOf<T> = T extends { readonly "~model"?: infer M } ? Exclude<M, undefined> : never;
+
 /** The decoded row of a table. */
-export type RowOf<T> =
-  T extends Table<string, infer F, any> ? { readonly [K in keyof F]: F[K]["Type"] } : never;
+export type RowOf<T> = [ModelOf<T>] extends [never]
+  ? T extends Table<string, infer F, any>
+    ? { readonly [K in keyof F]: F[K]["Type"] }
+    : never
+  : ModelOf<T> extends { readonly Type: infer R }
+    ? R
+    : never;
 
 type OptionalOnInsert<F extends Fields, D> = {
   [K in keyof F]: K extends D ? K : null extends F[K]["Encoded"] ? K : never;
@@ -71,7 +137,13 @@ type OptionalOnInsert<F extends Fields, D> = {
  * What `insert` accepts: nullable columns and columns declared in `defaults`
  * may be left out.
  */
-export type InsertOf<T> =
+export type InsertOf<T> = [ModelOf<T>] extends [never]
+  ? PlainInsertOf<T>
+  : ModelOf<T> extends { readonly insert: { readonly "~type.make.in": infer I } }
+    ? I
+    : never;
+
+type PlainInsertOf<T> =
   T extends Table<string, infer F, infer D>
     ? { readonly [K in Exclude<keyof F, OptionalOnInsert<F, D>>]: F[K]["Type"] } & {
         readonly [K in OptionalOnInsert<F, D>]?: F[K]["Type"];
@@ -81,8 +153,13 @@ export type InsertOf<T> =
     : never;
 
 /** What `executeUpdate` accepts: any subset of the columns. */
-export type UpdateOf<T> =
-  T extends Table<string, infer F, any> ? { readonly [K in keyof F]?: F[K]["Type"] } : never;
+export type UpdateOf<T> = [ModelOf<T>] extends [never]
+  ? T extends Table<string, infer F, any>
+    ? { readonly [K in keyof F]?: F[K]["Type"] }
+    : never
+  : ModelOf<T> extends { readonly update: { readonly Type: infer U } }
+    ? { readonly [K in keyof U]?: U[K] }
+    : never;
 
 export interface TableOptions<F, D extends keyof F = never> {
   /**

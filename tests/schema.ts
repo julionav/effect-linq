@@ -1,6 +1,9 @@
 import { PgClient } from "@effect/sql-pg";
 import { Redacted, Schema } from "effect";
-import { database, Table } from "../src/index.ts";
+// The engine's tests declare tables with the internal layer that `entity` builds
+// on, so that they cover it directly; tests/models.ts uses the public API.
+import { database } from "../src/query.ts";
+import * as Table from "../src/table.ts";
 import { DATABASE_URL } from "./global-setup.ts";
 
 export const UserId = Schema.Number.pipe(Schema.brand("UserId"));

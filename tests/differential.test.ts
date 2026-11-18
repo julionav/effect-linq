@@ -6,7 +6,9 @@
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { beforeAll, describe, expect, test } from "vite-plus/test";
-import { from, quote, Table } from "../src/index.ts";
+import { quote } from "../src/index.ts";
+import { from } from "../src/query.ts";
+import * as Table from "../src/table.ts";
 import { PgLive } from "./schema.ts";
 
 const Samples = Table.make(

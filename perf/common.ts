@@ -4,27 +4,27 @@
  */
 import { PgClient } from "@effect/sql-pg";
 import { Effect, ManagedRuntime, Redacted, Schema } from "effect";
+import { Model } from "effect/schema";
 import { SqlClient } from "effect/sql/SqlClient";
-import { database, Table } from "../src/index.ts";
+import { dbContext, entity } from "../src/index.ts";
 
 const url = process.env.LINQ_TEST_DATABASE_URL ?? "postgres://postgres:linq@localhost:54871/linq";
 
 export const ROWS = 20_000;
 
-export const Items = Table.make(
-  "p_items",
-  {
-    id: Schema.Number,
-    ownerId: Schema.Number,
-    name: Schema.String,
-    price: Schema.NumberFromString,
-    active: Schema.Boolean,
-    createdAt: Schema.DateTimeUtcFromDate,
-  },
-  { schema: "linq_bench", columns: Table.snakeCase, defaults: ["id", "createdAt"] },
-);
+export class Item extends Model.Class<Item>("Item")({
+  id: Model.GeneratedByDb(Schema.Number),
+  ownerId: Schema.Number,
+  name: Schema.String,
+  price: Schema.NumberFromString,
+  active: Schema.Boolean,
+  createdAt: Model.GeneratedByDb(Schema.DateTimeUtcFromDate),
+}) {}
 
-export const db = database({ items: Items });
+export const db = dbContext(
+  { items: entity(Item, (e) => e.toTable("p_items")) },
+  { schema: "linq_bench", naming: "snake_case" },
+);
 
 const runtime = ManagedRuntime.make(PgClient.layer({ url: Redacted.make(url), maxConnections: 2 }));
 

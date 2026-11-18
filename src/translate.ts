@@ -71,6 +71,8 @@ export interface QuerySource {
   readonly table: AnyTable;
   readonly rels: Relations | undefined;
   readonly ops: ReadonlyArray<Op>;
+  /** the client it runs on, when not the environment's (typed in query.ts) */
+  readonly client?: any;
 }
 
 const isQuerySource = (u: unknown): u is QuerySource =>
@@ -829,12 +831,22 @@ export class Translator {
         }
         const size = keys.length;
         const track = this.materialize?.(table);
+        // a table declared from a Model.Class: rows are instances of the class
+        const proto = table.model?.proto;
         if (track !== undefined) {
           return (row) => {
             if (presence !== undefined && row[presence] === null) return null;
-            const out: Record<string, unknown> = {};
+            const out: Record<string, unknown> = proto === undefined ? {} : Object.create(proto);
             for (let i = 0; i < size; i++) out[keys[i]!] = readers[i]!(row);
             return track(out);
+          };
+        }
+        if (proto !== undefined) {
+          return (row) => {
+            if (presence !== undefined && row[presence] === null) return null;
+            const out: Record<string, unknown> = Object.create(proto);
+            for (let i = 0; i < size; i++) out[keys[i]!] = readers[i]!(row);
+            return out;
           };
         }
         return (row) => {

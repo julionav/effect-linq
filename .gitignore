@@ -8,3 +8,4 @@ dist
 .env.*
 !.env.example
 bench/wasm/*.wasm
+tests/.migrations

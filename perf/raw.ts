@@ -1,7 +1,7 @@
 /** The journeys as hand-written SQL through Effect SQL: the baseline for what the library adds. */
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
-import { cleanup, Items, newItem, nextPrice, prepare, repeat, REPEAT } from "./common.ts";
+import { cleanup, Item, newItem, nextPrice, prepare, repeat, REPEAT } from "./common.ts";
 
 export { prepare };
 
@@ -15,8 +15,8 @@ interface Wire {
 }
 
 // what a careful hand-written data layer does: decode each row through the same schemas
-const decodePrice = Schema.decodeUnknownSync(Items.fields.price);
-const decodeCreatedAt = Schema.decodeUnknownSync(Items.fields.createdAt);
+const decodePrice = Schema.decodeUnknownSync(Item.fields.price);
+const decodeCreatedAt = Schema.decodeUnknownSync(Item.fields.createdAt);
 const decode = (row: Wire) => ({
   id: row.id,
   ownerId: row.owner_id,

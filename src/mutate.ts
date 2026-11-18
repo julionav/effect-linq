@@ -63,6 +63,7 @@ const assignments = (
   args: ReadonlyArray<Sym>,
   target: EntitySym,
   operator: string,
+  extra?: OnUpdateValues,
 ): Array<Assignment> => {
   let entries: Array<readonly [string, Sym]>;
   if ("fn" in values) {
@@ -78,8 +79,12 @@ const assignments = (
     entries = Object.entries(values.value).map(([key, value]) => [key, t.captured(value)] as const);
   }
   const out: Array<Assignment> = [];
+  const model = target.table.model;
   for (const [key, sym] of entries) {
     const col = column(target.table, key, operator);
+    if (model?.notUpdatable.has(key) && !(sym.k === "const" && sym.value === undefined)) {
+      fail(`${operator}: "${key}" cannot be updated (it is not in the model's update variant)`);
+    }
     if (sym.k === "const") {
       if (sym.value === undefined) continue;
       out.push({ col, sql: bind(col, sym.value), constant: true });
@@ -88,8 +93,19 @@ const assignments = (
     }
   }
   if (out.length === 0) fail(`${operator}: no column values were given`);
+  // columns the model refreshes on every update, unless they were given
+  if (extra !== undefined) {
+    for (const [col, value] of extra) {
+      if (!out.some((item) => item.col === col)) {
+        out.push({ col, sql: bind(col, value), constant: true });
+      }
+    }
+  }
   return out;
 };
+
+/** Values for the columns a model refreshes on update (`Model.DateTimeUpdate`). */
+export type OnUpdateValues = ReadonlyArray<readonly [Column, unknown]>;
 
 const setClause = (items: ReadonlyArray<Assignment>): Frag =>
   join(
@@ -296,11 +312,12 @@ export const compileUpdate = (
   values: Values,
   returning: Returning,
   options?: WriteOptions,
+  onUpdate?: OnUpdateValues,
 ): Plan => {
   const s = scope(source, "executeUpdate()");
   const { t, select, row } = s;
   const table = source.table;
-  const items = assignments(t, values, [row], row, "executeUpdate()");
+  const items = assignments(t, values, [row], row, "executeUpdate()", onUpdate);
   if (isDirect(s)) {
     guard(select, options, "executeUpdate()");
     const statement: Array<Frag> = ["UPDATE ", select.from, " SET ", setClause(items)];

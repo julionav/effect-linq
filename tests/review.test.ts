@@ -2,7 +2,9 @@
 import { Cause, Effect, Exit, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { beforeEach, describe, expect, test } from "vite-plus/test";
-import { ConcurrencyError, from, LinqError, session, Table } from "../src/index.ts";
+import { ConcurrencyError, LinqError, session } from "../src/index.ts";
+import { from } from "../src/query.ts";
+import * as Table from "../src/table.ts";
 import { type AuthorId, db as readDb, PgLive, writeDb } from "./schema.ts";
 
 const r = writeDb("r");

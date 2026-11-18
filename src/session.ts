@@ -23,6 +23,7 @@ import {
   type Leaf,
   type Materialize,
   type Query,
+  onClient,
   type QueryEffect,
   runPlan,
 } from "./query.ts";
@@ -613,7 +614,14 @@ const grouped = <K, V>(items: Iterable<V>, key: (item: V) => K): Map<K, Array<V>
 
 // ------------------------------------------------------------------ session
 
-export class Session {
+export class Session<Env = SqlClient> {
+  /** The client the session runs on, when it came from a context service. */
+  private readonly client: SqlClient | undefined;
+
+  constructor(client?: SqlClient) {
+    this.client = client;
+  }
+
   private readonly stores = new Map<AnyTable, Store>();
   private readonly added: Array<Pending> = [];
   private readonly removed: Array<Ref> = [];
@@ -640,21 +648,27 @@ export class Session {
   // ----- reading
 
   /** Runs the query and tracks every table row in its result. */
-  load<T>(query: Query<T, any>): QueryEffect<Array<Tracked<Materialize<T>>>> {
-    return runPlan(() => compileQuery(query, { k: "all" }, this.materialize));
+  load<T>(query: Query<T, any, any>): QueryEffect<Array<Tracked<Materialize<T>>>, never, Env> {
+    return this.run(runPlan(() => compileQuery(query, { k: "all" }, this.materialize)));
   }
 
   /** The first row, tracked; fails with `NoSuchElementError` when there is none. */
-  first<T>(query: Query<T, any>): QueryEffect<Tracked<Materialize<T>>, Cause.NoSuchElementError> {
+  first<T>(
+    query: Query<T, any, any>,
+  ): QueryEffect<Tracked<Materialize<T>>, Cause.NoSuchElementError, Env> {
     return Effect.flatMap(this.firstOption(query), (row) =>
       Option.isNone(row) ? Effect.fail(new Cause.NoSuchElementError()) : Effect.succeed(row.value),
     );
   }
 
-  firstOption<T>(query: Query<T, any>): QueryEffect<Option.Option<Tracked<Materialize<T>>>> {
-    return Effect.map(
-      runPlan<Array<any>>(() => compileQuery(query, { k: "first" }, this.materialize)),
-      (rows) => (rows.length === 0 ? Option.none() : Option.some(rows[0])),
+  firstOption<T>(
+    query: Query<T, any, any>,
+  ): QueryEffect<Option.Option<Tracked<Materialize<T>>>, never, Env> {
+    return this.run(
+      Effect.map(
+        runPlan<Array<any>>(() => compileQuery(query, { k: "first" }, this.materialize)),
+        (rows) => (rows.length === 0 ? Option.none() : Option.some(rows[0])),
+      ),
     );
   }
 
@@ -663,45 +677,48 @@ export class Session {
    * returned without a query. For a composite key, pass the values in order.
    */
   find<T, W extends AnyTable>(
-    table: Query<T, W>,
+    table: Query<T, W, any>,
     key: unknown,
-  ): QueryEffect<Option.Option<Tracked<RowOf<W>>>> {
-    return Effect.suspend(() => {
-      const target = table.table;
-      const pk = target.primaryKey;
-      if (pk.length === 0) return Effect.die(new LinqError(`"${target.name}" has no primary key`));
-      const values = pk.length === 1 ? [key] : (key as ReadonlyArray<unknown>);
-      const probe: Row = {};
-      pk.forEach((col, i) => (probe[col.key] = values[i]));
-      const store = this.store(target);
-      const slot = store.index.get(store.key(probe));
-      if (slot !== undefined) {
-        return Effect.succeed(
-          store.states[slot] === DELETED ? Option.none() : Option.some(store.entities[slot]),
+  ): QueryEffect<Option.Option<Tracked<RowOf<W>>>, never, Env> {
+    return this.run(
+      Effect.suspend(() => {
+        const target = table.table;
+        const pk = target.primaryKey;
+        if (pk.length === 0)
+          return Effect.die(new LinqError(`"${target.name}" has no primary key`));
+        const values = pk.length === 1 ? [key] : (key as ReadonlyArray<unknown>);
+        const probe: Row = {};
+        pk.forEach((col, i) => (probe[col.key] = values[i]));
+        const store = this.store(target);
+        const slot = store.index.get(store.key(probe));
+        if (slot !== undefined) {
+          return Effect.succeed(
+            store.states[slot] === DELETED ? Option.none() : Option.some(store.entities[slot]),
+          );
+        }
+        // row => row.k0 === key0 && row.k1 === key1
+        const condition = pk
+          .map((col, i) => ({
+            t: "b" as const,
+            op: "===" as const,
+            l: { t: "m" as const, o: { t: "p" as const, n: "row" }, n: col.key },
+            r: { t: "c" as const, i },
+          }))
+          .reduce((l, r) => ({ t: "b", op: "&&", l, r }) as never);
+        const where: Op = {
+          k: "where",
+          fn: callable({
+            ast: { v: 1, p: ["row"], b: condition, loc: "Session.find" },
+            captures: values.map((value) => () => value),
+          }),
+        };
+        const source = { table: target, rels: table.rels, ops: [where] };
+        return Effect.map(
+          runPlan<Array<any>>(() => compileQuery(source, { k: "first" }, this.materialize)),
+          (rows) => (rows.length === 0 ? Option.none() : Option.some(rows[0])),
         );
-      }
-      // row => row.k0 === key0 && row.k1 === key1
-      const condition = pk
-        .map((col, i) => ({
-          t: "b" as const,
-          op: "===" as const,
-          l: { t: "m" as const, o: { t: "p" as const, n: "row" }, n: col.key },
-          r: { t: "c" as const, i },
-        }))
-        .reduce((l, r) => ({ t: "b", op: "&&", l, r }) as never);
-      const where: Op = {
-        k: "where",
-        fn: callable({
-          ast: { v: 1, p: ["row"], b: condition, loc: "Session.find" },
-          captures: values.map((value) => () => value),
-        }),
-      };
-      const source = { table: target, rels: table.rels, ops: [where] };
-      return Effect.map(
-        runPlan<Array<any>>(() => compileQuery(source, { k: "first" }, this.materialize)),
-        (rows) => (rows.length === 0 ? Option.none() : Option.some(rows[0])),
-      );
-    }) as never;
+      }) as never,
+    );
   }
 
   // ----- changing
@@ -710,7 +727,7 @@ export class Session {
    * Schedules a row to be inserted by `saveChanges`, and returns the object
    * that will be tracked. Columns the database fills in are set on it then.
    */
-  add<T, W extends AnyTable>(table: Query<T, W>, row: InsertOf<W>): Tracked<RowOf<W>> {
+  add<T, W extends AnyTable>(table: Query<T, W, any>, row: InsertOf<W>): Tracked<RowOf<W>> {
     if (table.ops.length > 0) fail("add() expects a table, not a query");
     if (typeof row !== "object" || row === null) return fail("add() expects an object");
     this.added.push({ store: this.store(table.table), entity: row });
@@ -827,7 +844,66 @@ export class Session {
    * Fails with `ConcurrencyError`, and writes nothing, when a row to update
    * or delete is no longer there (or, with a `version` column, was changed).
    */
-  saveChanges(): Effect.Effect<
+  saveChanges(): Effect.Effect<number, SqlError | Schema.SchemaError | ConcurrencyError, Env> {
+    return this.run(Effect.flatMap(this.prepare(), () => this.write()));
+  }
+
+  /** On the session's own client when it has one; `Env` is then nothing. */
+  private run<A, E>(effect: Effect.Effect<A, E, SqlClient>): Effect.Effect<A, E, Env> {
+    return onClient(this.client, effect) as never;
+  }
+
+  /**
+   * What models do before a write: fill in what the application generates on
+   * insert (ids, timestamps), and refresh the columns that change with every
+   * update (`Model.DateTimeUpdate`).
+   */
+  private prepare(): Effect.Effect<void, Schema.SchemaError> {
+    return Effect.suspend(() => {
+      const steps: Array<Effect.Effect<void, Schema.SchemaError>> = [];
+      for (const item of this.added) {
+        const model = item.store.table.model;
+        if (model === undefined) continue;
+        steps.push(
+          Effect.map(model.makeInsert(item.entity), (made) => {
+            Object.assign(item.entity, made);
+          }),
+        );
+      }
+      let modified: ReturnType<Session["modified"]>;
+      try {
+        modified = this.modified();
+      } catch (error) {
+        return Schema.isSchemaError(error) ? Effect.fail(error) : Effect.die(error);
+      }
+      // one value per column and save, shared by every row
+      const makers = new Map<Column, Effect.Effect<unknown, Schema.SchemaError>>();
+      const stale: Array<{ entity: Row; col: Column }> = [];
+      for (const { ref, cols } of modified) {
+        for (const { col, make } of ref.store.table.model?.onUpdate ?? []) {
+          if (cols.includes(col)) continue;
+          makers.set(col, make);
+          stale.push({ entity: entityOf(ref), col });
+        }
+      }
+      if (stale.length > 0) {
+        steps.push(
+          Effect.map(
+            Effect.forEach([...makers], ([col, make]) =>
+              Effect.map(make, (value) => [col, value] as const),
+            ),
+            (values) => {
+              const fresh = new Map(values);
+              for (const { entity, col } of stale) entity[col.key] = fresh.get(col);
+            },
+          ),
+        );
+      }
+      return Effect.all(steps, { discard: true });
+    });
+  }
+
+  private write(): Effect.Effect<
     number,
     SqlError | Schema.SchemaError | ConcurrencyError,
     SqlClient
@@ -894,6 +970,9 @@ export class Session {
             commit.push(() => {
               batch.forEach((item, i) => {
                 Object.assign(item.entity, rows[i]!);
+                // a row of a model is an instance of its class, as loaded rows are
+                if (table.model !== undefined)
+                  Object.setPrototypeOf(item.entity, table.model.proto);
                 this.added.splice(this.added.indexOf(item), 1);
                 // without a key it cannot be found again: inserted, not tracked
                 if (table.primaryKey.length === 0) return;
@@ -920,6 +999,13 @@ export class Session {
       const version = table.version;
       for (const group of grouped(items, (item) => signature(item.cols)).values()) {
         const cols = group[0]!.cols;
+        const locked = cols.find((col) => table.model?.notUpdatable.has(col.key));
+        if (locked !== undefined) {
+          fail(
+            `"${locked.key}" of a tracked row of "${table.name}" was changed, but it cannot be ` +
+              "updated (it is not in the model's update variant)",
+          );
+        }
         const width = identity(table).length + cols.length;
         for (const batch of chunks(group, Math.max(1, Math.floor(MAX_PARAMS / width)))) {
           const refs = batch.map((item) => item.ref);
@@ -970,3 +1056,6 @@ const NONE: Array<Column> = [];
 
 /** Starts a unit of work. See {@link Session}. */
 export const session = (): Session => new Session();
+
+/** A unit of work on a given client: what a context service's `session()` returns. */
+export const sessionOn = (client: SqlClient): Session<never> => new Session<never>(client);

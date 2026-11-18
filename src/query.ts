@@ -9,6 +9,7 @@ import {
   compileUpdate,
   type Conflict,
   insertBatchSize,
+  type OnUpdateValues,
   type Returning,
   type Values,
   type WriteOptions,
@@ -176,11 +177,21 @@ export interface Group<K, T> {
   every(predicate: (item: T) => boolean): boolean;
 }
 
-export type QueryEffect<A, E = never> = Effect.Effect<
+/**
+ * What running a query gives. `Env` is what it still needs: a `SqlClient`,
+ * or nothing when the query came from a context service (which holds one).
+ */
+export type QueryEffect<A, E = never, Env = SqlClient> = Effect.Effect<
   A,
   SqlError | Schema.SchemaError | E,
-  SqlClient
+  Env
 >;
+
+type Run<Env, A, E = never> = QueryEffect<A, E, Env>;
+
+/** Runs an effect on the given client rather than the environment's. */
+export const onClient = <X>(client: SqlClient | undefined, effect: X): X =>
+  client === undefined ? effect : (Effect.provideService(effect as never, SqlClient, client) as X);
 
 // ------------------------------------------------------------------ quotes
 
@@ -210,7 +221,7 @@ const lambda = (fn: unknown, operator: string): Callable => callable(quoteOf(fn,
 export const quote: {
   <F extends (...args: Array<any>) => unknown>(fn: F): F;
   /** With a query first, the lambda's first parameter is typed as that query's row. */
-  <T, F extends (row: T, ...args: Array<any>) => unknown>(source: Query<T, any>, fn: F): F;
+  <T, F extends (row: T, ...args: Array<any>) => unknown>(source: Query<T, any, any>, fn: F): F;
 } = (...args: Array<unknown>): any => {
   const fn = args[args.length - 1];
   quoteOf(fn, "quote");
@@ -218,7 +229,7 @@ export const quote: {
 };
 
 /** The row a query's lambdas receive: `type User = RowIn<typeof db.users>`. */
-export type RowIn<Q> = Q extends Query<infer T, any> ? T : never;
+export type RowIn<Q> = Q extends Query<infer T, any, any> ? T : never;
 
 // ------------------------------------------------------------------- query
 
@@ -236,7 +247,10 @@ const subquery = <X extends object>(source: QuerySource, terminal: Terminal, eff
 };
 
 const run = <A>(source: QuerySource, terminal: Terminal): QueryEffect<A> =>
-  runPlan(() => compileQuery(source, terminal));
+  onClient(
+    source.client,
+    runPlan(() => compileQuery(source, terminal)),
+  );
 
 export const runPlan = <A>(compile: () => Plan): QueryEffect<A> =>
   Effect.suspend(() => {
@@ -266,24 +280,24 @@ export const runPlan = <A>(compile: () => Plan): QueryEffect<A> =>
 export type { WriteOptions } from "./mutate.ts";
 
 /** The effect of a write, which can also show the statement it runs. */
-export type WriteEffect<A> = QueryEffect<A> & {
+export type WriteEffect<A, Env = SqlClient> = QueryEffect<A, never, Env> & {
   /** The SQL this statement runs, for logging and tests. */
   toSql(): { readonly sql: string; readonly params: ReadonlyArray<unknown> };
 };
 
 /** Adds `returning` to the effect of a write, which by itself counts rows. */
-export interface Returnable<T, W> {
+export interface Returnable<T, W, Env = SqlClient> {
   /** Runs the statement and returns the rows it wrote (deleted rows, for a delete). */
-  returning(): WriteEffect<Array<RowOf<W>>>;
-  returning<R>(selector: (row: T) => R): WriteEffect<Array<Materialize<R>>>;
+  returning(): WriteEffect<Array<RowOf<W>>, Env>;
+  returning<R>(selector: (row: T) => R): WriteEffect<Array<Materialize<R>>, Env>;
 }
 
 /** An UPDATE or DELETE: an effect of the number of rows affected. */
-export type Mutation<T, W> = WriteEffect<number> & Returnable<T, W>;
+export type Mutation<T, W, Env = SqlClient> = WriteEffect<number, Env> & Returnable<T, W, Env>;
 
-export interface Conflictable<T, W> {
+export interface Conflictable<T, W, Env = SqlClient> {
   /** Skips rows that violate a unique constraint (on `target`, or any). */
-  onConflictDoNothing(target?: ConflictTarget<W>): Mutation<T, W>;
+  onConflictDoNothing(target?: ConflictTarget<W>): Mutation<T, W, Env>;
   /**
    * Upsert: when a row with the same `target` exists, updates it instead.
    * Without `values`, the existing row takes every inserted value.
@@ -291,28 +305,29 @@ export interface Conflictable<T, W> {
   onConflictDoUpdate(
     target: ConflictTarget<W>,
     values?: UpdateOf<W> | ((existing: RowOf<W>, proposed: RowOf<W>) => UpdateOf<W>),
-  ): Mutation<T, W>;
+  ): Mutation<T, W, Env>;
 }
 
 type ConflictTarget<W> = (keyof RowOf<W> & string) | ReadonlyArray<keyof RowOf<W> & string>;
 
 /** An INSERT of several rows: an effect of the number of rows inserted. */
-export type Insert<T, W> = Mutation<T, W> & Conflictable<T, W>;
+export type Insert<T, W, Env = SqlClient> = Mutation<T, W, Env> & Conflictable<T, W, Env>;
 
 /** An INSERT of one row; `returning` yields that row rather than an array. */
-export type InsertOne<T, W> = WriteEffect<number> &
-  Conflictable<T, W> & {
-    returning(): WriteEffect<RowOf<W>>;
-    returning<R>(selector: (row: T) => R): WriteEffect<Materialize<R>>;
+export type InsertOne<T, W, Env = SqlClient> = WriteEffect<number, Env> &
+  Conflictable<T, W, Env> & {
+    returning(): WriteEffect<RowOf<W>, Env>;
+    returning<R>(selector: (row: T) => R): WriteEffect<Materialize<R>, Env>;
   };
 
 const mutation = (
+  client: SqlClient | undefined,
   compile: (returning: Returning) => Plan,
   run: (returning: Returning) => QueryEffect<unknown> = (returning) =>
     runPlan(() => compile(returning)),
 ): any => {
   const make = (returning: Returning) =>
-    Object.assign(run(returning), {
+    Object.assign(onClient(client, run(returning)), {
       toSql: () => {
         const plan = compile(returning);
         return { sql: plan.sql, params: plan.params };
@@ -335,7 +350,16 @@ const insertRows = (
 ): any => {
   const compile = (returning: Returning, batch = rows) =>
     compileInsert(source, batch, conflict, returning, single);
-  const run = (returning: Returning): QueryEffect<unknown> => {
+  const model = source.table.model;
+  const run = (returning: Returning): QueryEffect<unknown> =>
+    model === undefined
+      ? insert(returning, rows)
+      : // the model fills in what the application generates (ids, timestamps) and validates
+        Effect.flatMap(
+          Effect.forEach(rows, (row) => model.makeInsert(row)),
+          (made) => insert(returning, made),
+        );
+  const insert = (returning: Returning, rows: ReadonlyArray<unknown>): QueryEffect<unknown> => {
     const size = insertBatchSize(source.table);
     const one = (batch: ReadonlyArray<unknown>) => runPlan<any>(() => compile(returning, batch));
     if (rows.length === 0) return Effect.succeed(returning === undefined ? 0 : []);
@@ -353,7 +377,7 @@ const insertRows = (
       ),
     );
   };
-  return mutation(compile, run);
+  return mutation(source.client, compile, run);
 };
 
 /**
@@ -363,20 +387,29 @@ const insertRows = (
  * `W` is the table the query can write to; it is lost by operators that change
  * the row shape (`select`, `groupBy`, `join`).
  */
-export class Query<T, W = never> implements QuerySource, Operators<T> {
+export class Query<T, W = never, Env = SqlClient> implements QuerySource, Operators<T> {
   readonly [QueryTypeId]: typeof QueryTypeId = QueryTypeId;
   readonly table: AnyTable;
   readonly rels: Relations | undefined;
   readonly ops: ReadonlyArray<Op>;
 
-  constructor(table: AnyTable, rels: Relations | undefined, ops: ReadonlyArray<Op>) {
+  /** The client the query runs on, when it came from a context service; otherwise the environment's. */
+  readonly client: SqlClient | undefined;
+
+  constructor(
+    table: AnyTable,
+    rels: Relations | undefined,
+    ops: ReadonlyArray<Op>,
+    client?: SqlClient,
+  ) {
     this.table = table;
     this.rels = rels;
     this.ops = ops;
+    this.client = client;
   }
 
-  private with<R>(op: Op): Query<R, any> {
-    return new Query(this.table, this.rels, [...this.ops, op]);
+  private with<R>(op: Op): Query<R, any, Env> {
+    return new Query(this.table, this.rels, [...this.ops, op], this.client);
   }
 
   // ----- operators
@@ -385,13 +418,16 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
     return this.with<T>({ k: "where", fn: lambda(predicate, "where") }) as this;
   }
 
-  select<R>(selector: (item: T) => R): Query<R> {
+  select<R>(selector: (item: T) => R): Query<R, never, Env> {
     return this.with({ k: "select", fn: lambda(selector, "select") });
   }
 
   /** Flattens a collection: one result row per element. */
-  selectMany<R>(collection: (item: T) => Many<R>): Query<R>;
-  selectMany<C, R>(collection: (item: T) => Many<C>, result: (item: T, element: C) => R): Query<R>;
+  selectMany<R>(collection: (item: T) => Many<R>): Query<R, never, Env>;
+  selectMany<C, R>(
+    collection: (item: T) => Many<C>,
+    result: (item: T, element: C) => R,
+  ): Query<R, never, Env>;
   selectMany(collection: (item: T) => unknown, result?: (item: T, element: any) => unknown): any {
     return this.with({
       k: "selectMany",
@@ -430,15 +466,15 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
   }
 
   /** Groups rows; follow with `select` (and optionally `where`, which becomes HAVING). */
-  groupBy<K>(key: (item: T) => K): Query<Group<K, T>> {
+  groupBy<K>(key: (item: T) => K): Query<Group<K, T>, never, Env> {
     return this.with({ k: "groupBy", fn: lambda(key, "groupBy") });
   }
 
   join<U, R>(
-    other: Query<U, any>,
+    other: Query<U, any, any>,
     on: (left: T, right: U) => boolean,
     result: (left: T, right: U) => R,
-  ): Query<R> {
+  ): Query<R, never, Env> {
     return this.with({
       k: "join",
       left: false,
@@ -449,10 +485,10 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
   }
 
   leftJoin<U, R>(
-    other: Query<U, any>,
+    other: Query<U, any, any>,
     on: (left: T, right: U) => boolean,
     result: (left: T, right: Nullable<U>) => R,
-  ): Query<R> {
+  ): Query<R, never, Env> {
     return this.with({
       k: "join",
       left: true,
@@ -463,7 +499,7 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
   }
 
   /** Loads a relation along with each row. */
-  include<K extends NavKeysOf<T> & string>(relation: K): Query<Included<T, K>, W> {
+  include<K extends NavKeysOf<T> & string>(relation: K): Query<Included<T, K>, W, Env> {
     return this.with({ k: "include", key: relation });
   }
 
@@ -498,16 +534,16 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
 
   // ----- execution
 
-  toArray(): QueryEffect<Array<Materialize<T>>> {
-    return execute(this, { k: "all" });
+  toArray(): Run<Env, Array<Materialize<T>>> {
+    return execute(this, { k: "all" }) as never;
   }
 
-  [Symbol.iterator](): Effect.EffectIterator<QueryEffect<Array<Materialize<T>>>> {
+  [Symbol.iterator](): Effect.EffectIterator<Run<Env, Array<Materialize<T>>>> {
     return this.toArray()[Symbol.iterator]();
   }
 
   /** The first row; fails with `NoSuchElementError` when there is none. */
-  first(predicate?: (item: T) => boolean): QueryEffect<Materialize<T>, Cause.NoSuchElementError> {
+  first(predicate?: (item: T) => boolean): Run<Env, Materialize<T>, Cause.NoSuchElementError> {
     const source = predicate === undefined ? this : this.where(predicate);
     const terminal: Terminal = { k: "first" };
     return subquery(
@@ -516,58 +552,58 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
       Effect.flatMap(run<Array<Materialize<T>>>(source, terminal), (rows) =>
         rows.length === 0 ? Effect.fail(new Cause.NoSuchElementError()) : Effect.succeed(rows[0]!),
       ),
-    );
+    ) as never;
   }
 
-  firstOption(predicate?: (item: T) => boolean): QueryEffect<Option.Option<Materialize<T>>> {
+  firstOption(predicate?: (item: T) => boolean): Run<Env, Option.Option<Materialize<T>>> {
     const source = predicate === undefined ? this : this.where(predicate);
     return Effect.map(run<Array<Materialize<T>>>(source, { k: "first" }), (rows) =>
       rows.length === 0 ? Option.none() : Option.some(rows[0]!),
-    );
+    ) as never;
   }
 
-  count(predicate?: (item: T) => boolean): QueryEffect<number> {
+  count(predicate?: (item: T) => boolean): Run<Env, number> {
     return this.scalar("count", predicate);
   }
 
-  any(predicate?: (item: T) => boolean): QueryEffect<boolean> {
+  any(predicate?: (item: T) => boolean): Run<Env, boolean> {
     return this.scalar("any", predicate);
   }
 
-  all(predicate: (item: T) => boolean): QueryEffect<boolean> {
+  all(predicate: (item: T) => boolean): Run<Env, boolean> {
     return this.scalar("all", predicate);
   }
 
-  sum(this: Query<number>): QueryEffect<number>;
-  sum(selector: (item: T) => number | null): QueryEffect<number>;
-  sum(selector?: unknown): QueryEffect<number> {
+  sum(this: Query<number, any, Env>): Run<Env, number>;
+  sum(selector: (item: T) => number | null): Run<Env, number>;
+  sum(selector?: unknown): Run<Env, number> {
     return this.scalar("sum", selector);
   }
 
-  average(this: Query<number>): QueryEffect<number | null>;
-  average(selector: (item: T) => number | null): QueryEffect<number | null>;
-  average(selector?: unknown): QueryEffect<number | null> {
+  average(this: Query<number, any, Env>): Run<Env, number | null>;
+  average(selector: (item: T) => number | null): Run<Env, number | null>;
+  average(selector?: unknown): Run<Env, number | null> {
     return this.scalar("average", selector);
   }
 
-  min(this: Query<T>): QueryEffect<Materialize<T> | null>;
-  min<R>(selector: (item: T) => R): QueryEffect<Materialize<R> | null>;
-  min(selector?: unknown): QueryEffect<any> {
+  min(this: Query<T, any, Env>): Run<Env, Materialize<T> | null>;
+  min<R>(selector: (item: T) => R): Run<Env, Materialize<R> | null>;
+  min(selector?: unknown): Run<Env, any> {
     return this.scalar("min", selector);
   }
 
-  max(this: Query<T>): QueryEffect<Materialize<T> | null>;
-  max<R>(selector: (item: T) => R): QueryEffect<Materialize<R> | null>;
-  max(selector?: unknown): QueryEffect<any> {
+  max(this: Query<T, any, Env>): Run<Env, Materialize<T> | null>;
+  max<R>(selector: (item: T) => R): Run<Env, Materialize<R> | null>;
+  max(selector?: unknown): Run<Env, any> {
     return this.scalar("max", selector);
   }
 
-  private scalar<A>(name: string, fn: unknown): QueryEffect<A> {
+  private scalar<A>(name: string, fn: unknown): Run<Env, A> {
     return execute(this, {
       k: "scalar",
       name,
       args: fn === undefined ? [] : [lambda(fn, name)],
-    });
+    }) as never;
   }
 
   // ----- writes
@@ -581,8 +617,8 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
    * const count = yield* db.users.insert([a, b, c])
    * ```
    */
-  insert(row: InsertOf<W>): InsertOne<T, W>;
-  insert(rows: ReadonlyArray<InsertOf<W>>): Insert<T, W>;
+  insert(row: InsertOf<W>): InsertOne<T, W, Env>;
+  insert(rows: ReadonlyArray<InsertOf<W>>): Insert<T, W, Env>;
   insert(input: unknown): any {
     const single = !Array.isArray(input);
     const rows: ReadonlyArray<unknown> = single ? [input] : (input as ReadonlyArray<unknown>);
@@ -614,14 +650,32 @@ export class Query<T, W = never> implements QuerySource, Operators<T> {
     this: Writable<this, W>,
     set: UpdateOf<W> | ((row: T) => UpdateOf<W>),
     options?: WriteOptions,
-  ): Mutation<T, W> {
+  ): Mutation<T, W, Env> {
     const assigned = values(set, "executeUpdate");
-    return mutation((returning) => compileUpdate(this, assigned, returning, options));
+    const onUpdate = this.table.model?.onUpdate ?? [];
+    if (onUpdate.length === 0) {
+      return mutation(this.client, (returning) =>
+        compileUpdate(this, assigned, returning, options),
+      );
+    }
+    // the model refreshes some columns on every update (Model.DateTimeUpdate)
+    const fresh = Effect.forEach(onUpdate, ({ col, make }) =>
+      Effect.map(make, (value) => [col, value] as const),
+    );
+    return mutation(
+      this.client,
+      (returning) =>
+        compileUpdate(this, assigned, returning, options, Effect.runSync(fresh) as OnUpdateValues),
+      (returning) =>
+        Effect.flatMap(fresh, (extra) =>
+          runPlan(() => compileUpdate(this, assigned, returning, options, extra)),
+        ),
+    );
   }
 
   /** Deletes every row of this query in one statement, without loading them. */
-  executeDelete(this: Writable<this, W>, options?: WriteOptions): Mutation<T, W> {
-    return mutation((returning) => compileDelete(this, returning, options));
+  executeDelete(this: Writable<this, W>, options?: WriteOptions): Mutation<T, W, Env> {
+    return mutation(this.client, (returning) => compileDelete(this, returning, options));
   }
 
   /** The SQL this query runs, for logging and tests. Throws if it cannot be translated. */
@@ -707,8 +761,8 @@ export type Entity<DB extends Shape, K extends keyof DB["tables"]> = RowOf<DB["t
     : never;
 } & { readonly [NavKeys]?: keyof RelsOf<DB, K> };
 
-export type Database<Ts extends Tables, Rels> = {
-  readonly [K in keyof Ts]: Query<Entity<{ tables: Ts; rels: Rels & {} }, K>, Ts[K]>;
+export type Database<Ts extends Tables, Rels, Env = SqlClient> = {
+  readonly [K in keyof Ts]: Query<Entity<{ tables: Ts; rels: Rels & {} }, K>, Ts[K], Env>;
 };
 
 const relationBuilder: RelationBuilder = {
