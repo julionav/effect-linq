@@ -1,46 +1,30 @@
 /**
- * Effect's own SQL pieces working with the model: `Model.Class` entities,
- * `SqlModel` repositories, `SqlSchema`, and migrations generated from the
- * model and run by `PgMigrator`.
+ * The model: `Model.Class` entities configured with the builder, migrations
+ * generated from it and run by `PgMigrator`, and the context as a service.
  */
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { NodeServices } from "@effect/platform-node";
 import { PgClient, PgMigrator } from "@effect/sql-pg";
-import {
-  Cause,
-  Context,
-  DateTime,
-  Effect,
-  Exit,
-  Layer,
-  Redacted,
-  Schema,
-  String as Str,
-} from "effect";
+import { Cause, Context, DateTime, Effect, Exit, Layer, Redacted, Schema } from "effect";
 import { fromFileSystem } from "effect/sql/MigratorFileSystem";
 import { SqlClient } from "effect/sql/SqlClient";
-import * as SqlSchema from "effect/sql/SqlSchema";
 import { beforeAll, describe, expect, expectTypeOf, test } from "vite-plus/test";
 import {
   ConcurrencyError,
   LinqError,
   Migrations,
+  type Query,
   quote,
-  repository,
-  session,
+  type RowIn,
 } from "../src/index.ts";
+import { session } from "../src/session.ts";
 import { DATABASE_URL } from "./global-setup.ts";
 import { AppDb, Article, db, dbV2, Member, type MemberId } from "./models.ts";
 
 const directory = new URL("./.migrations", import.meta.url).pathname;
 
-// as an application sharing tables with SqlModel would configure its client
 const Live = Layer.mergeAll(
-  PgClient.layer({
-    url: Redacted.make(DATABASE_URL),
-    transformQueryNames: Str.camelToSnake,
-    transformResultNames: Str.snakeToCamel,
-  }),
+  PgClient.layer({ url: Redacted.make(DATABASE_URL) }),
   NodeServices.layer,
 );
 
@@ -345,82 +329,10 @@ describe("Model.Class entities", () => {
   });
 });
 
-describe("with SqlModel and SqlSchema", () => {
-  test("a SqlModel repository and a query see the same rows, as the same class", async () => {
-    await run(
-      Effect.gen(function* () {
-        const repo = yield* repository(db.members);
-        // written by SqlModel, read by a query
-        const made = yield* Member.insert.makeEffect({
-          email: "barbara@example.com",
-          displayName: "Barbara",
-          age: 50,
-          balance: 7,
-        });
-        const inserted = yield* repo.insert(made);
-        expect(inserted).toBeInstanceOf(Member);
-        const [queried] = yield* db.members.where((m) => m.id === inserted.id);
-        expect(queried).toEqual(inserted);
-
-        // written by a statement, read by SqlModel
-        yield* db.members.where((m) => m.id === inserted.id).executeUpdate({ age: 51 });
-        const found = yield* repo.findById(inserted.id);
-        expect(found.age).toBe(51);
-        expect(found).toBeInstanceOf(Member);
-
-        // a row from a query is a valid SqlModel update payload
-        const updated = yield* repo.update(
-          yield* Member.update.makeEffect({
-            id: queried!.id,
-            email: queried!.email,
-            displayName: "Barbara L.",
-            age: queried!.age,
-            balance: queried!.balance,
-          }),
-        );
-        expect(updated.displayName).toBe("Barbara L.");
-        expect(
-          yield* db.members.where((m) => m.id === inserted.id).select((m) => m.displayName),
-        ).toEqual(["Barbara L."]);
-        yield* repo.delete(inserted.id);
-        expect(yield* db.members.count((m) => m.id === inserted.id)).toBe(0);
-      }),
-    );
-  });
-
-  test("SqlSchema decodes hand-written SQL into the same class", async () => {
-    const rows = await run(
-      Effect.gen(function* () {
-        const sql = yield* SqlClient;
-        const adults = SqlSchema.findAll({
-          Request: Schema.Number,
-          Result: Member,
-          execute: (age) => sql`select * from m_members where age >= ${age} order by id`,
-        });
-        const viaSchema = yield* adults(30);
-        const viaQuery = yield* db.members
-          .where((m) => m.age !== null && m.age >= 30)
-          .orderBy((m) => m.id);
-        expect(viaSchema).toEqual(viaQuery);
-        return viaSchema;
-      }),
-    );
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows[0]).toBeInstanceOf(Member);
-  });
-});
-
 describe("the context as a service", () => {
   // installation: the context's layer on top of a client's
   const AppLive = AppDb.layer.pipe(
-    Layer.provide(
-      PgClient.layer({
-        url: Redacted.make(DATABASE_URL),
-        // only SqlModel needs these; queries name their columns themselves
-        transformQueryNames: Str.camelToSnake,
-        transformResultNames: Str.snakeToCamel,
-      }),
-    ),
+    Layer.provide(PgClient.layer({ url: Redacted.make(DATABASE_URL) })),
   );
 
   // an application service that depends on the context, as it would on any other service
@@ -529,17 +441,24 @@ describe("the context as a service", () => {
     expect(result.version).toBeGreaterThan(1);
   });
 
-  test("a SqlModel repository from the service needs nothing but the service", async () => {
+  test("shared query functions keep the service's queries free of other requirements", async () => {
+    type ArticleRow = RowIn<typeof AppDb.model.articles>;
+    const popular = <W, Env>(articles: Query<ArticleRow, W, Env>) =>
+      articles.where((a) => a.views >= 100n);
+    const newest =
+      (n: number) =>
+      <W, Env>(articles: Query<ArticleRow, W, Env>) =>
+        articles.orderByDescending((a) => a.id).take(n);
     const program = Effect.gen(function* () {
       const app = yield* AppDb;
-      const repo = yield* repository(app.members);
-      const found = yield* repo.findById(1 as MemberId);
-      const [queried] = yield* app.members.where((m) => m.id === 1);
-      return { found, queried };
+      // still writable, and still only needing the context
+      expect(app.articles.pipe(popular).executeUpdate({ title: "x" }).toSql().sql).toContain(
+        "UPDATE",
+      );
+      return yield* app.articles.pipe(popular, newest(1)).select((a) => a.title);
     });
-    const { found, queried } = await inApp(program);
-    expect(found).toBeInstanceOf(Member);
-    expect(found).toEqual(queried);
+    expectTypeOf<Effect.Services<typeof program>>().toEqualTypeOf<AppDb>();
+    expect(await inApp(program)).toEqual(["COBOL"]);
   });
 
   test("the model is available without a connection", async () => {

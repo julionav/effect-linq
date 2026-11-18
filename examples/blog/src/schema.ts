@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 import { Model } from "effect/schema";
-import { dbContext, entity } from "effect-linq";
+import { DbContext, entity } from "effect-linq";
 
 export class User extends Model.Class<User>("User")({
   id: Model.GeneratedByDb(Schema.Number),
@@ -29,7 +29,8 @@ export class Comment extends Model.Class<Comment>("Comment")({
   score: Schema.Number,
 }) {}
 
-export const db = dbContext(
+export class BlogDb extends DbContext.Service<BlogDb>()(
+  "blog/BlogDb",
   {
     users: entity(User, (e) =>
       e
@@ -44,4 +45,4 @@ export const db = dbContext(
     comments: entity(Comment, (e) => e.hasOne("author", () => User, { foreignKey: "authorId" })),
   },
   { schema: "linq_test", naming: "snake_case" },
-);
+) {}

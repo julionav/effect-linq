@@ -1,7 +1,9 @@
 # effect-linq
 
-LINQ to SQL for TypeScript, on top of [Effect SQL](https://effect.website). Queries are written as
-plain lambdas, compiled to expression trees at build time, and translated to Postgres at run time.
+LINQ to SQL for TypeScript, in the style of EF Core, on top of
+[Effect SQL](https://effect.website). Entities are Effect models, the context is an Effect
+service, and queries are plain lambdas, compiled to expression trees at build time and translated
+to Postgres at run time.
 
 ```ts
 const minAge = 18;
@@ -62,39 +64,20 @@ node --import effect-linq/register app.ts
 A lambda that was not compiled is rejected the moment it is passed to an operator, with a message
 that says so. Nothing is ever guessed from `Function.prototype.toString`.
 
-Queries are Effects that need a `SqlClient`; provide Effect SQL's Postgres layer as usual:
+## Models
 
-```ts
-import { PgClient } from "@effect/sql-pg";
-import { Effect, Redacted } from "effect";
-
-const program = Effect.gen(function* () {
-  const adults = yield* db.users.where((u) => (u.age ?? 0) >= 18).orderBy((u) => u.name);
-  const count = yield* db.posts.count((p) => p.published);
-  return { adults, count };
-});
-
-Effect.runPromise(
-  program.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) }))),
-);
-```
-
-## The model
-
-Entities are Effect [`Model.Class`](https://effect.website) classes: the same ones `SqlModel`,
-`SqlSchema` and `SqlResolver` take. Everything the classes do not say (table and column names,
-keys, column types, indexes, relations) is configured once, with a fluent builder per entity, as
-in EF Core's `OnModelCreating`:
+Entities are Effect [`Model.Class`](https://effect.website) classes. Nothing about them is
+specific to this library:
 
 ```ts
 import { Schema } from "effect";
 import { Model } from "effect/schema";
-import { dbContext, entity } from "effect-linq";
 
 export class User extends Model.Class<User>("User")({
   id: Model.GeneratedByDb(UserId),
   email: Schema.String,
   name: Schema.NonEmptyString,
+  age: Schema.NullOr(Schema.Int),
   balance: Schema.NumberFromString, // numeric arrives as a string
   version: Model.GeneratedByDb(Schema.Int),
   createdAt: Model.DateTimeInsertFromDate, // set on insert
@@ -105,10 +88,31 @@ export class Post extends Model.Class<Post>("Post")({
   id: Model.GeneratedByDb(Schema.Int),
   authorId: UserId,
   title: Schema.String,
+  published: Schema.Boolean,
   tags: Schema.Array(Schema.String),
 }) {}
+```
 
-export const db = dbContext(
+The model's variants decide how rows are read and written:
+
+- **Rows are instances of the class** (`row instanceof User`), with the types of its select
+  variant.
+- **`insert` takes the insert variant.** Database-generated fields cannot be given, and what the
+  application generates (`Model.DateTimeInsert`, `Model.UuidV4Insert`) is filled in.
+- **Updates follow the update variant.** Fields it omits cannot be set, and fields it refreshes
+  (`Model.DateTimeUpdate`) are set by every `executeUpdate` and every session save.
+
+## The context
+
+Everything the models do not say (table and column names, keys, column types, indexes,
+relations) is configured once, with a fluent builder per entity, as in EF Core's
+`OnModelCreating`. The context is an Effect service:
+
+```ts
+import { DbContext, entity } from "effect-linq";
+
+export class AppDb extends DbContext.Service<AppDb>()(
+  "app/AppDb",
   {
     users: entity(User, (e) =>
       e
@@ -125,7 +129,7 @@ export const db = dbContext(
     ),
   },
   { naming: "snake_case" }, // also: schema
-);
+) {}
 ```
 
 | Builder                              | What it sets                                                                                 |
@@ -136,52 +140,43 @@ export const db = dbContext(
 | `hasIndex(fields, { unique, name })` | an index                                                                                     |
 | `hasOne` / `hasOptional` / `hasMany` | a relation, by `{ foreignKey, onDelete }` or by a lambda for anything else                   |
 
-What follows from the model's variants:
+A relation given by `foreignKey` also becomes a foreign key constraint in migrations. A lambda
+(`(user, post) => post.authorId === user.id && post.published`) is only a relation.
 
-- **Rows are instances of the class** (`row instanceof User`), with the types of its select
-  variant, so they can be handed to anything that takes the model.
-- **`insert` takes the insert variant.** Database-generated fields cannot be given, and what the
-  application generates (`Model.DateTimeInsert`, `Model.UuidV4Insert`) is filled in.
-- **Updates follow the update variant.** Fields it omits cannot be set, and fields it refreshes
-  (`Model.DateTimeUpdate`) are set by every `executeUpdate` and every session save.
-- A relation given by `foreignKey` also becomes a foreign key constraint in migrations. A lambda
-  (`(user, post) => post.authorId === user.id && post.published`) is only a relation.
+### Installing it
 
-### Installing the context
-
-As with `services.AddDbContext<AppDb>(...)` in EF Core, an application declares its context once
-and installs it. Here the context is an Effect service, and installing it is providing its layer:
+As with `services.AddDbContext<AppDb>(...)` in EF Core, the context is installed once, at the
+composition root. This is the only place the rest of Effect SQL appears: the context's layer
+goes on top of any Effect SQL Postgres client.
 
 ```ts
 import { PgClient } from "@effect/sql-pg";
-import { Effect, Layer, Redacted } from "effect";
-import { DbContext, entity } from "effect-linq";
+import { Layer, Redacted } from "effect";
 
-export class AppDb extends DbContext.Service<AppDb>()(
-  "app/AppDb",
-  {
-    users: entity(User, (e) => e.hasMany("posts", () => Post, { foreignKey: "authorId" })),
-    posts: entity(Post, (e) => e.hasOne("author", () => User, { foreignKey: "authorId" })),
-  },
-  { naming: "snake_case" },
-) {}
-
-// composition root: the context on a client; swap the client's layer per environment
 const AppDbLive = AppDb.layer.pipe(
   Layer.provide(PgClient.layer({ url: Redacted.make(process.env.DATABASE_URL!) })),
 );
 ```
 
-Application code asks for the context like any other service. Its queries hold the client the
-layer was built with, so nothing but `AppDb` appears in their requirements:
+### Using it
+
+Application code asks for the context like any other service, and needs nothing else:
 
 ```ts
-const adults = Effect.gen(function* () {
+const program = Effect.gen(function* () {
   const db = yield* AppDb;
-  return yield* db.users.where((u) => (u.age ?? 0) >= 18).orderBy((u) => u.name);
-}); // Effect<User[], SqlError | SchemaError, AppDb>
 
-// a service of your own depends on it the same way
+  const adults = yield* db.users.where((u) => (u.age ?? 0) >= 18).orderBy((u) => u.name);
+  const user = yield* db.users.insert({ email, name, age: 36, balance: 0 }).returning();
+  yield* db.posts.where((p) => p.authorId === user.id && !p.published).executeDelete();
+}); // Effect<void, SqlError | SchemaError, AppDb>
+
+Effect.runPromise(program.pipe(Effect.provide(AppDbLive)));
+```
+
+A service of your own depends on it the same way:
+
+```ts
 export class Accounts extends Context.Service<Accounts, { … }>()("app/Accounts") {
   static readonly layer = Layer.effect(
     Accounts,
@@ -196,17 +191,16 @@ export class Accounts extends Context.Service<Accounts, { … }>()("app/Accounts
 }
 ```
 
-| On the service            |                                                                                                                   |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `db.users`, `db.posts`, … | queries and writes, bound to the context's client                                                                 |
-| `db.session()`            | a unit of work with change tracking, on the same client                                                           |
-| `db.transaction(effect)`  | runs effects in one transaction; statements and session saves both take part                                      |
-| `AppDb.layer`             | `Layer<AppDb, never, SqlClient>`                                                                                  |
-| `AppDb.model`             | the context without a client: for migrations and for declaring shared expressions (`quote(AppDb.model.users, …)`) |
+| On the service            |                                                                              |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| `db.users`, `db.posts`, … | queries and writes                                                           |
+| `db.session()`            | a unit of work with [change tracking](#change-tracking)                      |
+| `db.transaction(effect)`  | runs effects in one transaction; statements and session saves both take part |
+| `AppDb.layer`             | the layer that provides the context, given a Postgres client                 |
+| `AppDb.model`             | the model without a connection, for migrations and shared expressions        |
 
 In tests, provide `AppDb.layer` over a different client layer (a test database or container);
-nothing else changes. `dbContext(entities, options)` builds the same context without a service,
-for scripts and for code that would rather pass `SqlClient` through the environment.
+nothing else changes.
 
 ### Migrations
 
@@ -229,14 +223,19 @@ const added = await Effect.runPromise(
 console.log(added.file ?? "no changes", added.warnings);
 ```
 
-The files are ordinary Effect migrations, so they run the usual way:
+The files are ordinary Effect migrations, so Effect's migrator runs them, before the context is
+used:
 
 ```ts
 import { PgMigrator } from "@effect/sql-pg";
 import { fromFileSystem } from "effect/sql/MigratorFileSystem";
 
 const MigratorLive = PgMigrator.layer({ loader: fromFileSystem("migrations") });
-// run before the application starts: Layer.provideMerge(AppDbLive, MigratorLive) over the client
+
+const AppLive = AppDb.layer.pipe(
+  Layer.provideMerge(MigratorLive),
+  Layer.provide(PgClient.layer({ url })),
+);
 ```
 
 Generated SQL covers tables, columns (type, nullability, default, identity), primary keys,
@@ -245,90 +244,6 @@ indexes and foreign keys. Column types are inferred from the schemas (`Schema.In
 with `hasColumnType` where they cannot be. Destructive changes are written with a `WARNING`
 comment. A rename is seen as a drop and an add: edit the file to `RENAME` when the data must be
 kept. `Migrations.diff`, `snapshot` and `createScript` are available for other workflows.
-
-### With SqlModel and SqlSchema
-
-Entities are plain Effect models, so `SqlModel`, `SqlSchema` and `SqlResolver` work on the same
-tables, and return instances of the same classes that queries do.
-
-`repository(query)` is `SqlModel.makeRepository` with the table name and key taken from the
-model, so they are stated once:
-
-```ts
-import { Effect } from "effect";
-import { repository } from "effect-linq";
-
-const program = Effect.gen(function* () {
-  const db = yield* AppDb;
-  const users = yield* repository(db.users); // insert, insertVoid, update, updateVoid, findById, delete
-
-  // written through SqlModel
-  const user = yield* users.insert(yield* User.insert.makeEffect({ email, name, balance: 0 }));
-
-  // read through a query: the same row, as the same class
-  const same = yield* db.users.where((u) => u.id === user.id).first();
-
-  // written by a statement, read through SqlModel
-  yield* db.users.where((u) => u.id === user.id).executeUpdate({ name: "Ada L." });
-  const found = yield* users.findById(user.id); // found.name === "Ada L."
-
-  // a row from a query is a valid SqlModel payload
-  yield* users.update(yield* User.update.makeEffect({ ...found, name: "Ada" }));
-  yield* users.delete(user.id);
-});
-```
-
-A repository made from a context service runs on that service's client, as its queries do; one
-made from `dbContext(...)` uses the `SqlClient` of the environment. To build it yourself, the
-model class is all `SqlModel` needs:
-
-```ts
-import * as SqlModel from "effect/sql/SqlModel";
-
-const users =
-  yield *
-  SqlModel.makeRepository(User, {
-    tableName: "users",
-    spanPrefix: "Users",
-    idColumn: "id",
-  });
-```
-
-Hand-written SQL decodes into the same class with `SqlSchema`:
-
-```ts
-import { Schema } from "effect";
-import { SqlClient } from "effect/sql/SqlClient";
-import * as SqlSchema from "effect/sql/SqlSchema";
-
-const sql = yield * SqlClient;
-const adults = SqlSchema.findAll({
-  Request: Schema.Number,
-  Result: User,
-  execute: (age) => sql`select * from users where age >= ${age} order by id`,
-});
-const rows = yield * adults(18); // Array<User>, equal to db.users.where((u) => u.age >= 18)
-```
-
-Two things to set up when `SqlModel` shares tables with queries:
-
-- **Column names.** `SqlModel` and the `sql` tag write property names as column names, so with
-  `naming: "snake_case"` give the client the matching transforms. Queries from this library
-  name their columns themselves and are unaffected.
-
-  ```ts
-  import { String } from "effect";
-
-  PgClient.layer({
-    url,
-    transformQueryNames: String.camelToSnake,
-    transformResultNames: String.snakeToCamel,
-  });
-  ```
-
-- **The key in the update variant.** `SqlModel`'s `update` takes the key from the update
-  variant, which `Model.GeneratedByDb` leaves out. Declare a database-generated key that is
-  updated through `SqlModel` as `Model.Field({ select: UserId, update: UserId, json: UserId })`.
 
 ### Relations
 
@@ -348,7 +263,7 @@ On a query, and on collections inside a lambda:
 `where` · `select` · `selectMany` · `orderBy` / `orderByDescending` / `thenBy` / `thenByDescending` ·
 `take` · `skip` · `distinct` · `groupBy` · `join` · `leftJoin` · `include`
 
-Terminal (each returns an Effect requiring `SqlClient`; inside a lambda they are subqueries):
+Terminal (each returns an Effect; inside a lambda they are subqueries):
 
 `yield* query` / `toArray()` · `first()` · `firstOption()` · `count()` · `any()` · `all()` · `sum()` ·
 `min()` · `max()` · `average()`
@@ -429,9 +344,7 @@ was changed on them. It is opt-in per unit of work; queries run outside a sessio
 tracked.
 
 ```ts
-import { session } from "effect-linq";
-
-const uow = session();
+const uow = db.session();
 const order = yield * uow.first(db.orders.where((o) => o.id === id).include("lines"));
 order.status = "shipped"; // rows are plain mutable objects
 for (const line of order.lines) line.shipped = line.quantity;
@@ -495,18 +408,24 @@ Two alternatives were measured and rejected, both in `bench/tracking.ts`:
 
 Lambdas do not have to be inline. There are three kinds of reusable piece.
 
-**Expressions** are functions of a row. Declare them with `quote`; passing a query first types
-the row parameter:
+**Expressions** are functions of a row. Declare them with `quote`; passing a query of the model
+first types the row parameter:
 
 ```ts
 // queries/users.ts
-export const isAdult = quote(db.users, (u) => u.age !== null && u.age >= 18);
-export const olderThan = quote(db.users, (u, age: number) => u.age !== null && u.age > age);
-export const displayName = quote(db.users, (u) => `${u.name} <${u.email}>`);
-export const publishedPosts = quote(db.users, (u) => u.posts.where((p) => p.published));
+export const isAdult = quote(AppDb.model.users, (u) => u.age !== null && u.age >= 18);
+export const olderThan = quote(
+  AppDb.model.users,
+  (u, age: number) => u.age !== null && u.age > age,
+);
+export const displayName = quote(AppDb.model.users, (u) => `${u.name} <${u.email}>`);
+export const publishedPosts = quote(AppDb.model.users, (u) => u.posts.where((p) => p.published));
 
 // an expression can use other expressions
-export const isActiveAuthor = quote(db.users, (u) => isAdult(u) && publishedPosts(u).some());
+export const isActiveAuthor = quote(
+  AppDb.model.users,
+  (u) => isAdult(u) && publishedPosts(u).some(),
+);
 ```
 
 They can be passed to an operator or called inside any lambda, on the row or a related one
@@ -530,18 +449,19 @@ step sees one file at a time; a helper that was missed is reported when the quer
 `pipe`:
 
 ```ts
-type Post = RowIn<typeof db.posts>; // the row a query's lambdas receive
+type Post = RowIn<typeof AppDb.model.posts>; // the row a query's lambdas receive
 
-export const published = <W>(posts: Query<Post, W>) => posts.where((p) => p.published);
+export const published = <W, Env>(posts: Query<Post, W, Env>) => posts.where((p) => p.published);
 export const newest =
   (n: number) =>
-  <W>(posts: Query<Post, W>) =>
+  <W, Env>(posts: Query<Post, W, Env>) =>
     posts.orderByDescending((p) => p.createdAt).take(n);
 
 db.posts.pipe(published, newest(10));
 ```
 
-Keeping `W` generic keeps the result writable (`.pipe(published).executeDelete()`).
+Keeping `W` and `Env` generic keeps the result writable (`.pipe(published).executeDelete()`)
+and free of any requirement beyond the context.
 
 **Whole queries with parameters** are functions that return a query; the result stays
 composable: `const postsByAuthor = (id: UserId) => db.posts.where((p) => p.authorId === id)`.
@@ -570,12 +490,12 @@ The translation follows JavaScript, not SQL, wherever the two differ and it is p
    that turns driver rows into results. To-one relations become `LEFT JOIN`s, to-many relations
    correlated subqueries, nested collections `json_agg`, and anything applied after `take` /
    `distinct` / an aggregate wraps the query in a subquery.
-3. **Execution** goes through `SqlClient` (`sql.unsafe(text, params).values`), so pooling,
+3. **Execution** goes through the Effect SQL client the context was installed on, so pooling,
    transactions, tracing and errors are Effect SQL's.
 
 ## What is proven
 
-Run `vp test` (needs Postgres, see below). 324 tests:
+Run `vp test` (needs Postgres, see below). 322 tests:
 
 - **Differential** (`tests/differential.test.ts`): 140 expressions each run twice over the same 300
   rows, in Postgres and as the original JavaScript function, and must agree. This is what backs
@@ -597,10 +517,8 @@ Run `vp test` (needs Postgres, see below). 324 tests:
   through the loader hook must print the same output.
 - **Compiler and types** (`tests/compiler.test.ts`, `tests/types.test.ts`).
 - **Model** (`tests/model.test.ts`, `tests/models.ts`): `Model.Class` entities configured with the
-  builder; two generations of migrations generated from the model and run by `PgMigrator`;
-  a `SqlModel` repository and `SqlSchema` reading and writing the same rows as the same class;
-  the context as a service, with another service depending on it, transactions and a swapped
-  layer.
+  builder; two generations of migrations generated from the model and run by `PgMigrator`; the
+  context as a service, with another service depending on it, transactions and a swapped layer.
 - **Review** (`tests/review.test.ts`): a regression test for each defect two independent reviews
   found, among them partial writes on a failed one-statement save, the full-table guard on
   queries that follow relations, and identity-map key collisions.

@@ -18,17 +18,16 @@
  * );
  * ```
  *
- * The classes are ordinary Effect models: the same ones `SqlModel`,
- * `SqlSchema` and `SqlResolver` take.
+ * The classes are ordinary Effect models (`Model.Class`); nothing about them
+ * is specific to this library.
  */
 import { Context, Effect, Exit, Layer, Schema } from "effect";
 import type { Model } from "effect/schema";
 import { SqlClient } from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
-import * as SqlModel from "effect/sql/SqlModel";
 import { fail } from "./errors.ts";
 import { type Quote, QuoteSymbol } from "./ir.ts";
-import { type Database, onClient, Query, type RelationDef } from "./query.ts";
+import { type Database, Query, type RelationDef } from "./query.ts";
 import { type Session, sessionOn } from "./session.ts";
 import {
   type AnyTable,
@@ -263,13 +262,12 @@ export interface ContextOptions {
   readonly schema?: string;
   /**
    * How property names become table and column names: as they are (the
-   * default), `"snake_case"`, or a function. Match the `transformQueryNames`
-   * of your `SqlClient` if `SqlModel` repositories share the tables.
+   * default), `"snake_case"`, or a function.
    */
   readonly naming?: "snake_case" | ((name: string) => string);
 }
 
-/** What a context knows about its tables: used by migrations and `repository`. */
+/** What a context knows about its tables: used by migrations. */
 export interface ContextModel {
   readonly tables: ReadonlyArray<AnyTable>;
   readonly tableOf: (model: Model.Any) => AnyTable;
@@ -541,41 +539,6 @@ export const dbContext = <const Es extends Entities>(
   };
   Object.defineProperty(out, "$model", { value: model, enumerable: false });
   return out as never;
-};
-
-/**
- * An Effect `SqlModel` repository for an entity of the context, with the
- * table name and key taken from its configuration.
- *
- * `SqlModel` writes property names as column names, so with a naming
- * convention the `SqlClient` needs the matching `transformQueryNames` and
- * `transformResultNames`.
- */
-export const repository = <T, M extends Model.Any, Name extends string, Env = SqlClient>(
-  query: Query<T, ModelTable<Name, M>, Env>,
-  options?: { readonly spanPrefix?: string },
-): Effect.Effect<
-  ReturnType<typeof SqlModel.makeRepository<M, any>> extends Effect.Effect<infer A, any, any>
-    ? A
-    : never,
-  never,
-  Env
-> => {
-  const table = query.table;
-  if (table.model === undefined) return fail("repository() needs an entity declared from a Model");
-  if (table.primaryKey.length !== 1) {
-    return fail(`repository(): "${table.name}" needs a single-column primary key`);
-  }
-  const name = table.schema === undefined ? table.name : `${table.schema}.${table.name}`;
-  // on the query's own client when it came from a context service
-  return onClient(
-    query.client,
-    SqlModel.makeRepository(table.model.proto.constructor as never, {
-      tableName: name,
-      spanPrefix: options?.spanPrefix ?? table.name,
-      idColumn: table.primaryKey[0]!.key as never,
-    }),
-  ) as never;
 };
 
 // ------------------------------------------------------ dependency injection

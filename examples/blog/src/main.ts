@@ -4,9 +4,9 @@
  * `--import effect-linq/register`; both must print the same thing.
  */
 import { PgClient } from "@effect/sql-pg";
-import { Effect, Redacted } from "effect";
+import { Effect, Layer, Redacted } from "effect";
 import { quote } from "effect-linq";
-import { db } from "./schema.ts";
+import { BlogDb } from "./schema.ts";
 
 const url = process.env.LINQ_TEST_DATABASE_URL ?? "postgres://postgres:linq@localhost:54871/linq";
 
@@ -19,7 +19,7 @@ interface Filter {
 const isPublished = quote((post: { readonly published: boolean }) => post.published);
 
 /** A typical list endpoint: optional filters, paging, a nested projection. */
-const listPosts = (filter: Filter) =>
+const listPosts = (db: BlogDb["Service"], filter: Filter) =>
   db.posts
     .where(isPublished)
     .where(
@@ -42,8 +42,9 @@ const listPosts = (filter: Filter) =>
     }));
 
 const program = Effect.gen(function* () {
-  const firstPage = yield* listPosts({ page: 0 });
-  const searched = yield* listPosts({ page: 0, search: "NUMBERS", minViews: 100n });
+  const db = yield* BlogDb;
+  const firstPage = yield* listPosts(db, { page: 0 });
+  const searched = yield* listPosts(db, { page: 0, search: "NUMBERS", minViews: 100n });
   const leaderboard = yield* db.users
     .where((user) => user.posts.any())
     .select((user) => ({
@@ -61,10 +62,20 @@ const program = Effect.gen(function* () {
     .executeUpdate((post) => ({ title: post.title + suffix }))
     .returning((post) => ({ id: post.id, comments: post.comments.count() }))
     .toSql();
-  return { firstPage, searched, leaderboard, adults, sql: listPosts({ page: 1 }).toSql(), write };
+  return {
+    firstPage,
+    searched,
+    leaderboard,
+    adults,
+    sql: listPosts(db, { page: 1 }).toSql(),
+    write,
+  };
 });
 
-Effect.runPromise(program.pipe(Effect.provide(PgClient.layer({ url: Redacted.make(url) })))).then(
+// installation: the context's layer on a client's
+const BlogDbLive = BlogDb.layer.pipe(Layer.provide(PgClient.layer({ url: Redacted.make(url) })));
+
+Effect.runPromise(program.pipe(Effect.provide(BlogDbLive))).then(
   (result) => console.log(JSON.stringify(result, null, 2)),
   (error) => {
     console.error(error);

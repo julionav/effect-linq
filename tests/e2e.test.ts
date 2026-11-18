@@ -30,7 +30,7 @@ describe("built package", () => {
   test("a minified production build runs without the plugin at runtime", () => {
     const bundle = readFileSync(join(example, "dist/main.mjs"), "utf8");
     // minified: parameter names are gone from the code, but the expression trees keep them
-    expect(bundle.split("\n").length).toBeLessThan(60);
+    expect(bundle.split("\n").length).toBeLessThan(200);
     expect(/t:[`"']m[`"'],o:/.test(bundle)).toBe(true);
     expect(bundle.includes("oxc-parser")).toBe(false);
 

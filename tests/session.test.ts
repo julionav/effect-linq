@@ -1,7 +1,8 @@
 import { Cause, DateTime, Effect, Exit, Option, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
 import { beforeEach, describe, expect, test } from "vite-plus/test";
-import { ConcurrencyError, LinqError, session } from "../src/index.ts";
+import { ConcurrencyError, LinqError } from "../src/index.ts";
+import { session } from "../src/session.ts";
 import { type AuthorId, PgLive, writeDb } from "./schema.ts";
 
 const s = writeDb("s");

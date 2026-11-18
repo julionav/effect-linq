@@ -26,7 +26,6 @@ export {
   ConcurrencyError,
   type EntityState,
   Session,
-  session,
   type Tracked,
 } from "./session.ts";
 export * as Migrations from "./migrations.ts";
@@ -36,12 +35,10 @@ export {
   type ContextService,
   type ContextOptions,
   DbContext,
-  dbContext,
   entity,
   EntityBuilder,
   type EntityConfig,
   type ForeignKey,
   PropertyBuilder,
   type Rel,
-  repository,
 } from "./model.ts";

@@ -3,10 +3,10 @@
  * the tables, the connection, and the seed data. Each implementation exports the same journeys.
  */
 import { PgClient } from "@effect/sql-pg";
-import { Effect, ManagedRuntime, Redacted, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Redacted, Schema } from "effect";
 import { Model } from "effect/schema";
 import { SqlClient } from "effect/sql/SqlClient";
-import { dbContext, entity } from "../src/index.ts";
+import { DbContext, entity } from "../src/index.ts";
 
 const url = process.env.LINQ_TEST_DATABASE_URL ?? "postgres://postgres:linq@localhost:54871/linq";
 
@@ -21,12 +21,22 @@ export class Item extends Model.Class<Item>("Item")({
   createdAt: Model.GeneratedByDb(Schema.DateTimeUtcFromDate),
 }) {}
 
-export const db = dbContext(
+export class BenchDb extends DbContext.Service<BenchDb>()(
+  "perf/BenchDb",
   { items: entity(Item, (e) => e.toTable("p_items")) },
   { schema: "linq_bench", naming: "snake_case" },
+) {}
+
+const runtime = ManagedRuntime.make(
+  Layer.provideMerge(BenchDb.layer, PgClient.layer({ url: Redacted.make(url), maxConnections: 2 })),
 );
 
-const runtime = ManagedRuntime.make(PgClient.layer({ url: Redacted.make(url), maxConnections: 2 }));
+/** The context, as application code gets it from the service. */
+export const db = await runtime.runPromise(
+  Effect.gen(function* () {
+    return yield* BenchDb;
+  }),
+);
 
 export const run = <A>(effect: Effect.Effect<A, unknown, SqlClient>): Promise<A> =>
   runtime.runPromise(effect);

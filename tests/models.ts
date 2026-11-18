@@ -4,7 +4,10 @@
  */
 import { Schema } from "effect";
 import { Model } from "effect/schema";
-import { DbContext, dbContext, entity } from "../src/index.ts";
+import { DbContext, entity } from "../src/index.ts";
+// the context without a service: what `DbContext.Service` builds on, used here
+// where a test wants a second model over the same tables
+import { dbContext } from "../src/model.ts";
 
 export const MemberId = Schema.Int.pipe(Schema.brand("MemberId"));
 export type MemberId = typeof MemberId.Type;

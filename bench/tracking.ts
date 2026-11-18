@@ -7,7 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { PgClient } from "@effect/sql-pg";
 import { Effect, Redacted, Schema } from "effect";
 import { SqlClient } from "effect/sql/SqlClient";
-import { session } from "../src/index.ts";
+import { session } from "../src/session.ts";
 import { database } from "../src/query.ts";
 import * as Table from "../src/table.ts";
 
