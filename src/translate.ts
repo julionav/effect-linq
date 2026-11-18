@@ -8,7 +8,7 @@
 import { LinqError, fail } from "./errors.ts";
 import { type Node, type Pattern, type Quote, QuoteSymbol } from "./ir.ts";
 import { and, compileFrag, type Frag, ident, join, Param } from "./sql.ts";
-import type { AnyTable, Column, JsType } from "./table.ts";
+import { type AnyTable, classify, type Column, type JsType, storedAst } from "./table.ts";
 
 // ------------------------------------------------------------------- model
 
@@ -114,6 +114,13 @@ export interface ScalarSym {
   readonly col?: Column;
   /** custom decoder (nested collections) */
   readonly decode?: (value: any) => unknown;
+  /** a value inside a JSON column: the schema of what is stored there */
+  readonly jsonAst?: unknown;
+  /**
+   * The same JSON value as text (`->>`). It is NULL for a JSON `null`, which
+   * the value itself is not, and it is what an untyped value is compared as.
+   */
+  readonly jsonText?: Frag;
 }
 
 interface EntitySym {
@@ -388,6 +395,23 @@ const fromJson = (s: ScalarSym): ((value: any) => unknown) | undefined => {
 };
 
 // -------------------------------------------------------------- translator
+
+const UNTYPED = { _tag: "Unknown" };
+
+/** The schema of the JSON a value holds, when it is a JSON column or a path into one. */
+const jsonAstOf = (sym: ScalarSym): any =>
+  sym.jsonAst ??
+  (sym.col?.wire === "json" && sym.decode === undefined ? storedAst(sym.col) : undefined);
+
+/** A schema without its `null` and `undefined` alternatives; undefined when several remain. */
+const withoutNull = (ast: any): any => {
+  if (ast?._tag !== "Union") return ast;
+  const rest = ast.types.filter((t: any) => t._tag !== "Null" && t._tag !== "Undefined");
+  return rest.length === 1 ? withoutNull(rest[0]) : undefined;
+};
+
+/** A SQL string literal. */
+const literal = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, (char) => `\\${char}`);
 
@@ -1161,7 +1185,7 @@ export class Translator {
         if (name === "length") return constant(sym.items.length);
         return sym.items[Number(name)] ?? fail(`index ${name} is out of range`);
       case "scalar":
-        if (name === "length") {
+        if (name === "length" && jsonAstOf(sym) === undefined) {
           return {
             k: "scalar",
             sql: [sym.type === "array" ? "cardinality(" : "char_length(", sym.sql, ")"],
@@ -1169,7 +1193,10 @@ export class Translator {
             nullable: sym.nullable,
           };
         }
-        return fail(`property "${name}" of ${describe(sym)} cannot be translated to SQL`);
+        return (
+          this.jsonMember(sym, name) ??
+          fail(`property "${name}" of ${describe(sym)} cannot be translated to SQL`)
+        );
       case "coll": {
         if (name === "length") return this.call(sym, "count", []);
         if (!sym.single) {
@@ -1197,6 +1224,88 @@ export class Translator {
         return fail(`property "${name}" does not exist on a group`);
       case "lambda":
         return fail("a function has no translatable properties");
+    }
+  }
+
+  /**
+   * `row.meta.plan`: a property or element of a JSON column. The column's
+   * schema says what is stored there, and so how the value is read: text for
+   * a string, a number for a number, JSON for anything else.
+   */
+  private jsonMember(sym: ScalarSym, name: string): ScalarSym | undefined {
+    const ast = jsonAstOf(sym);
+    if (ast === undefined) return undefined;
+    const node = withoutNull(ast);
+    const index = /^(?:0|[1-9]\d*)$/.test(name) ? Number(name) : undefined;
+    let child: any;
+    switch (node?._tag) {
+      case "Objects": {
+        const property = node.propertySignatures.find((p: any) => p.name === name);
+        child = property?.type ?? node.indexSignatures[0]?.type;
+        if (child === undefined) {
+          return fail(`"${name}" is not a property of the JSON value, according to its schema`);
+        }
+        break;
+      }
+      case "Arrays":
+        if (name === "length") {
+          return {
+            k: "scalar",
+            sql: ["jsonb_array_length((", sym.sql, ")::jsonb)"],
+            type: "number",
+            nullable: true,
+          };
+        }
+        if (index === undefined) return fail(`"${name}" is not an index of a JSON array`);
+        child = node.elements[index] ?? node.rest[0];
+        if (child === undefined) return fail(`index ${name} is out of range of the JSON array`);
+        break;
+      case "Unknown":
+      case "Any":
+      case undefined:
+        // no schema for what is inside: any path, compared as what it is compared with
+        child = UNTYPED;
+        break;
+      default:
+        return fail(`property "${name}" of a JSON ${node._tag} cannot be translated to SQL`);
+    }
+    const key = index !== undefined && node?._tag !== "Objects" ? String(index) : literal(name);
+    const text: Frag = ["(", sym.sql, " ->> ", key, ")"];
+    const inner = withoutNull(child);
+    const type = inner === undefined ? "unknown" : classify(inner);
+    switch (type) {
+      case "string":
+        return { k: "scalar", sql: text, type, nullable: true };
+      case "number":
+        return { k: "scalar", sql: [text, "::float8"], type, nullable: true };
+      case "boolean":
+        return { k: "scalar", sql: [text, "::boolean"], type, nullable: true };
+      default:
+        return {
+          k: "scalar",
+          sql: ["(", sym.sql, " -> ", key, ")"],
+          type: "json",
+          nullable: true,
+          jsonAst: child,
+          jsonText: text,
+        };
+    }
+  }
+
+  /** A JSON value without a schema, read as what it is compared with. */
+  private jsonAs(sym: Sym, other: Sym): Sym {
+    if (sym.k !== "scalar" || sym.jsonText === undefined) return sym;
+    const type =
+      other.k === "const" ? typeOfValue(other.value) : other.k === "scalar" ? other.type : "json";
+    switch (type) {
+      case "string":
+        return { k: "scalar", sql: sym.jsonText, type, nullable: true };
+      case "number":
+        return { k: "scalar", sql: [sym.jsonText, "::float8"], type, nullable: true };
+      case "boolean":
+        return { k: "scalar", sql: [sym.jsonText, "::boolean"], type, nullable: true };
+      default:
+        return sym;
     }
   }
 
@@ -1313,7 +1422,7 @@ export class Translator {
           case "bigint":
             return ["(", sym.sql, " IS NOT NULL AND ", sym.sql, " <> 0)"];
           default:
-            return sym.nullable ? ["(", sym.sql, " IS NOT NULL)"] : "TRUE";
+            return sym.nullable ? ["(", sym.jsonText ?? sym.sql, " IS NOT NULL)"] : "TRUE";
         }
       case "entity":
         return sym.nullable ? this.entityIsNull(sym, true) : "TRUE";
@@ -1413,10 +1522,12 @@ export class Translator {
       }
     }
 
-    const right = evalRight();
+    let right = evalRight();
     if (left.k === "const" && right.k === "const") {
       return constant(jsBinary(op, left.value, right.value));
     }
+    left = this.jsonAs(left, right);
+    right = this.jsonAs(right, left);
     switch (op) {
       case "===":
       case "==":
@@ -1484,7 +1595,9 @@ export class Translator {
           return constant(negate);
         default: {
           const value = this.scalar(left);
-          return predicate(["(", value.sql, negate ? " IS NOT NULL)" : " IS NULL)"]);
+          // inside JSON, a `null` is a value; as text it is NULL like a missing key
+          const sql = value.jsonText ?? value.sql;
+          return predicate(["(", sql, negate ? " IS NOT NULL)" : " IS NULL)"]);
         }
       }
     }

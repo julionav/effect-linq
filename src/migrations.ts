@@ -9,7 +9,7 @@
  *
  * ```ts
  * // scripts/add-migration.ts, run as:
- * //   node --import effect-linq/register scripts/add-migration.ts add_posts
+ * //   node --import @blitz/effect-linq/register scripts/add-migration.ts add_posts
  * await Effect.runPromise(
  *   Migrations.add({ context: db, directory: "migrations", name: process.argv[2]! }).pipe(
  *     Effect.provide(NodeServices.layer),

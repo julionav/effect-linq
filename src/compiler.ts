@@ -249,6 +249,144 @@ class Unsupported extends Error {
   }
 }
 
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const sitePatterns = new Map<string, RegExp>();
+
+const isWordChar = (code: number): boolean =>
+  (code >= 97 && code <= 122) || // a-z
+  (code >= 65 && code <= 90) || // A-Z
+  (code >= 48 && code <= 57) || // 0-9
+  code === 95 || // _
+  code === 36; // $
+
+/**
+ * Decides from the text alone whether a file can contain a query lambda, so
+ * that the others are never parsed. It looks for a call of an operator whose
+ * arguments hold a function, or a name the file declares with `const`.
+ *
+ * It errs on the side of parsing: anything it cannot read cheaply (a template
+ * literal, a `/` that may start a regular expression, type arguments) counts
+ * as a possible site.
+ */
+export const mayContainSite = (
+  code: string,
+  methods: ReadonlySet<string>,
+  functions: ReadonlySet<string>,
+): boolean => {
+  const key = `${[...methods].join("|")}/${[...functions].join("|")}`;
+  let pattern = sitePatterns.get(key);
+  if (pattern === undefined) {
+    const alternatives: Array<string> = [];
+    if (methods.size > 0) {
+      alternatives.push(`\\.\\s*(?:${[...methods].map(escapeRegExp).join("|")})`);
+    }
+    if (functions.size > 0) {
+      alternatives.push(`(?<![.\\w$])(?:${[...functions].map(escapeRegExp).join("|")})`);
+    }
+    if (alternatives.length === 0) return false;
+    pattern = new RegExp(`(?:${alternatives.join("|")})\\s*([(<])`, "g");
+    sitePatterns.set(key, pattern);
+  }
+  let declared: Set<string> | undefined;
+  /** Is `word` a `const` of this file that can hold a function? */
+  const isHelper = (word: string): boolean => {
+    if (declared === undefined) {
+      declared = new Set();
+      // `const name = (`, `= x =>`, `= function`, `= <T>(`, or any annotated const
+      const helpers =
+        /\bconst\s+([A-Za-z_$][\w$]*)\s*(?::|=\s*(?:async\b|function\b|[(<]|[A-Za-z_$][\w$]*\s*=>))/g;
+      for (const found of code.matchAll(helpers)) declared.add(found[1]!);
+    }
+    return declared.has(word);
+  };
+  /**
+   * Reads code from `i` up to the bracket that closes the one it started in.
+   * Returns the position of that bracket, or -1 when the code may hold a
+   * query lambda (or cannot be read cheaply).
+   */
+  const scan = (i: number): number => {
+    let depth = 1;
+    for (; i < code.length; i++) {
+      const char = code.charCodeAt(i);
+      switch (char) {
+        case 40: // (
+        case 91: // [
+        case 123: // {
+          depth++;
+          break;
+        case 41: // )
+        case 93: // ]
+        case 125: // }
+          if (--depth === 0) return i;
+          break;
+        case 34: // "
+        case 39: {
+          // '
+          for (i++; i < code.length; i++) {
+            const inner = code.charCodeAt(i);
+            if (inner === 92) i++;
+            else if (inner === char || inner === 10) break;
+          }
+          break;
+        }
+        case 96: {
+          // ` : a template, whose ${} parts are code again
+          for (i++; ; i++) {
+            if (i >= code.length) return -1;
+            const inner = code.charCodeAt(i);
+            if (inner === 92) i++;
+            else if (inner === 96) break;
+            else if (inner === 36 && code.charCodeAt(i + 1) === 123) {
+              i = scan(i + 2);
+              if (i === -1) return -1;
+            }
+          }
+          break;
+        }
+        case 47: {
+          // /
+          const next = code.charCodeAt(i + 1);
+          if (next === 47) {
+            const end = code.indexOf("\n", i);
+            if (end === -1) return -1;
+            i = end;
+          } else if (next === 42) {
+            const end = code.indexOf("*/", i + 2);
+            if (end === -1) return -1;
+            i = end + 1;
+          } else {
+            // a division or a regular expression: not worth telling apart
+            return -1;
+          }
+          break;
+        }
+        case 61: // =
+          if (code.charCodeAt(i + 1) === 62) return -1; // =>
+          break;
+        default:
+          if (char >= 48 && char <= 57) {
+            // a number: skip it whole, so that `1e3` is not read as a name
+            while (i + 1 < code.length && isWordChar(code.charCodeAt(i + 1))) i++;
+          } else if (isWordChar(char)) {
+            const start = i;
+            while (i + 1 < code.length && isWordChar(code.charCodeAt(i + 1))) i++;
+            // a member name is not a reference: `row.name`
+            if (code.charCodeAt(start - 1) === 46) break;
+            const word = code.slice(start, i + 1);
+            if (word === "function" || isHelper(word)) return -1;
+          }
+      }
+    }
+    return -1;
+  };
+  pattern.lastIndex = 0;
+  for (let match = pattern.exec(code); match !== null; match = pattern.exec(code)) {
+    if (match[1] === "<" || scan(pattern.lastIndex) === -1) return true;
+  }
+  return false;
+};
+
 export const compile = (
   code: string,
   id: string,
@@ -257,23 +395,8 @@ export const compile = (
   const methods = new Set([...DEFAULT_METHODS, ...(options.methods ?? [])]);
   const functions = new Set([...DEFAULT_FUNCTIONS, ...(options.functions ?? [])]);
 
-  // Cheap pre-filter: skip files that cannot contain a call site.
-  let candidate = false;
-  for (const name of methods) {
-    if (code.includes(`${name}(`) || code.includes(`${name}<`)) {
-      candidate = true;
-      break;
-    }
-  }
-  if (!candidate) {
-    for (const name of functions) {
-      if (code.includes(`${name}(`) || code.includes(`${name}<`)) {
-        candidate = true;
-        break;
-      }
-    }
-  }
-  if (!candidate) return null;
+  // Cheap pre-filter: most files have no call site, and parsing is the cost.
+  if (!mayContainSite(code, methods, functions)) return null;
 
   const parsed = parseSync(id, code);
   if (parsed.errors.length > 0) {

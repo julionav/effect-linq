@@ -29,24 +29,23 @@ const rows = yield * query;
 Writes come in two styles: explicit statements (`insert`, `executeUpdate`, `executeDelete`), and
 opt-in [change tracking](#change-tracking) through a session (`load`, assign, `saveChanges`).
 
-Status: a working proof, not a release, and not published to npm. Postgres only.
+Status: early (0.x), published to npm as `@blitz/effect-linq`. Postgres only.
 See [Benchmarks](#benchmarks), [What is proven](#what-is-proven) and [Limitations](#limitations).
 
 ## Setup
 
-Requirements: Effect 4.1 (`effect` and `@effect/sql-pg`), Postgres, and a build that can run a
-Vite/Rollup-style plugin. Running TypeScript directly through the loader hook needs Node 22.15 or
-later.
+Requirements: Effect 4.1 or later (`effect` and `@effect/sql-pg`), Postgres, and one of: a build
+that can run a Vite/Rollup-style plugin, Bun, or Node 22.15 or later.
 
 ```sh
-bun add effect-linq effect @effect/sql-pg   # once published; until then, from this repository
+bun add @blitz/effect-linq effect @effect/sql-pg
 ```
 
 The lambdas need a build step. Add the plugin wherever your code is compiled:
 
 ```ts
 // vite.config.ts (Vite, Vitest, and `vp pack` / tsdown / Rolldown all take the same plugin)
-import { linq } from "effect-linq/vite";
+import { linq } from "@blitz/effect-linq/vite";
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({
@@ -58,8 +57,54 @@ export default defineConfig({
 For code that Node runs directly, with no bundler:
 
 ```sh
-node --import effect-linq/register app.ts
+node --import @blitz/effect-linq/register app.ts
 ```
+
+For code that Bun runs directly, preload the Bun plugin, on the command line or in `bunfig.toml`:
+
+```sh
+bun --preload @blitz/effect-linq/bun/register main.ts
+```
+
+```toml
+# bunfig.toml
+preload = ["@blitz/effect-linq/bun/register"]
+```
+
+To choose which files it compiles, preload a script of your own instead. The options are those of
+the Vite plugin (`include`, `exclude`, `strict`, `methods`, `functions`):
+
+```ts
+// linq.preload.ts, then: bun --preload ./linq.preload.ts main.ts
+import { plugin } from "bun";
+import { linq } from "@blitz/effect-linq/bun";
+
+plugin(linq({ include: /[\\/]src[\\/].*\.ts$/ }));
+```
+
+The same plugin goes in a build step. A bundle made with it has the lambdas compiled in, so it runs
+with no preload and without `oxc-parser`. Bun takes plugins through its JavaScript API only, not
+through the `bun build` command:
+
+```ts
+// build.ts, then: bun build.ts && bun dist/main.js
+import { linq } from "@blitz/effect-linq/bun";
+
+const result = await Bun.build({
+  entrypoints: ["src/main.ts"],
+  outdir: "dist",
+  target: "bun",
+  plugins: [linq({ strict: true })], // strict: an untranslatable lambda fails the build
+});
+if (!result.success) {
+  for (const log of result.logs) console.error(log);
+  process.exit(1);
+}
+```
+
+Whichever way the code is compiled, a file is only parsed when its text shows a call of a query
+operator with a function in it. On a 1,739-file, 9.7 MB server that leaves 167 files to parse and
+47 ms of work in total.
 
 A lambda that was not compiled is rejected the moment it is passed to an operator, with a message
 that says so. Nothing is ever guessed from `Function.prototype.toString`.
@@ -109,7 +154,7 @@ relations) is configured once, with a fluent builder per entity, as in EF Core's
 `OnModelCreating`. The context is an Effect service:
 
 ```ts
-import { DbContext, entity } from "effect-linq";
+import { DbContext, entity } from "@blitz/effect-linq";
 
 export class AppDb extends DbContext.Service<AppDb>()(
   "app/AppDb",
@@ -204,15 +249,19 @@ nothing else changes.
 
 ### Migrations
 
-Migrations are generated from the model and run by Effect's `Migrator`. `Migrations.add` compares
+Migrations are optional. Queries, writes and change tracking only read the entity configuration,
+so entities can describe tables that already exist and are migrated by hand or by another tool;
+nothing looks for a snapshot or a migration table unless you call `Migrations`.
+
+When you do want them, they are generated from the model and run by Effect's `Migrator`. `Migrations.add` compares
 the model with a snapshot kept beside the migration files, writes the difference as the next
 `<id>_<name>.ts`, and updates the snapshot. It never touches a database.
 
 ```ts
-// scripts/add-migration.ts — run: node --import effect-linq/register scripts/add-migration.ts add_posts
+// scripts/add-migration.ts — run: node --import @blitz/effect-linq/register scripts/add-migration.ts add_posts
 import { NodeServices } from "@effect/platform-node";
 import { Effect } from "effect";
-import { Migrations } from "effect-linq";
+import { Migrations } from "@blitz/effect-linq";
 import { AppDb } from "../src/db.ts";
 
 const added = await Effect.runPromise(
@@ -281,6 +330,8 @@ Also `toSql()` for logging, `quote(fn)` to keep an expression in a variable, and
 - Dates: comparison, `getTime`, `toISOString`, and the `getUTC*` parts.
 - Arrays: `ids.includes(u.id)` (one array parameter), `list.some(x => …)`, `[a, b].includes(x)`,
   and array columns (`p.tags.includes("x")`, `p.tags.length`).
+- JSON columns: `a.settings.owner.name`, `a.settings.items[0].sku`, `a.settings.items.length`.
+  See [JSON columns](#json-columns).
 - `Sql.like`, `Sql.ilike`, `Sql.now()`, and `Sql.fn("name")` to declare any SQL function.
 - Anything that does not depend on the row is ordinary JavaScript, evaluated when the query runs
   and bound as a parameter. Conditions on such values fold away, so optional filters cost nothing:
@@ -289,6 +340,39 @@ Also `toSql()` for logging, `quote(fn)` to keep an expression in a variable, and
 db.users.where((u) => filter.name === undefined || u.name === filter.name);
 // no WHERE clause at all when filter.name is undefined
 ```
+
+### JSON columns
+
+A property path into a `json` or `jsonb` column is translated with `->` and `->>`. The column's
+schema says what is stored at the path, and so how it is read:
+
+```ts
+class Account extends Model.Class<Account>("Account")({
+  id: Schema.Number,
+  settings: Schema.Struct({
+    plan: Schema.String,
+    seats: Schema.Number,
+    owner: Schema.Struct({ name: Schema.String }),
+    limits: Schema.NullOr(Schema.Struct({ max: Schema.Number })),
+  }),
+  extra: Schema.NullOr(Schema.Record(Schema.String, Schema.Unknown)),
+}) {}
+
+db.accounts
+  .where((a) => a.settings.plan === "pro" && a.settings.seats > 5)
+  .orderBy((a) => a.settings.owner.name)
+  .select((a) => ({ id: a.id, max: a.settings.limits?.max ?? 0 }));
+// WHERE ("settings" ->> 'plan') = $1 AND ("settings" ->> 'seats')::float8 > 5
+```
+
+- A string is read as text, a number as `float8`, a boolean as `boolean`, and from there every
+  operator and method listed above applies, as do `groupBy`, `orderBy` and the aggregates.
+- An object or array inside the JSON is selected as it is stored.
+- A missing key, an optional property and a JSON `null` are all `null`.
+- Where the schema says nothing (`Schema.Unknown`, the values of a `Schema.Record`), any path is
+  accepted and the value is read as what it is compared with: `a.extra.region === "eu"` compares
+  text, `a.extra.score > 40` a number.
+- A path the schema does not have is an error when the query is built.
 
 ## Writes
 
@@ -479,7 +563,7 @@ The translation follows JavaScript, not SQL, wherever the two differ and it is p
 
 ## How it works
 
-1. **Build time** (`effect-linq/compiler`, ~800 lines on `oxc-parser`). Every arrow function passed
+1. **Build time** (`@blitz/effect-linq/compiler`, ~900 lines on `oxc-parser`). Every arrow function passed
    to a query operator is wrapped: the original function is kept, and a JSON expression tree is
    attached to it. The largest subexpressions that do not mention a lambda parameter become
    thunks, so captured variables are read lazily, at execution. The transform is syntactic (it
@@ -495,7 +579,7 @@ The translation follows JavaScript, not SQL, wherever the two differ and it is p
 
 ## What is proven
 
-Run `vp test` (needs Postgres, see below). 322 tests:
+Run `vp test` (needs Postgres, see below). 338 tests:
 
 - **Differential** (`tests/differential.test.ts`): 140 expressions each run twice over the same 300
   rows, in Postgres and as the original JavaScript function, and must agree. This is what backs
@@ -514,7 +598,10 @@ Run `vp test` (needs Postgres, see below). 322 tests:
   functions imported from another file, same-file helpers, and what the build step picks up.
 - **Build** (`tests/e2e.test.ts`): the package is built with `vp pack`, an example app is built
   against it minified with the plugin in strict mode and run by plain Node; the same source run
-  through the loader hook must print the same output.
+  through the Node loader hook, by Bun with its plugin preloaded, and from a `Bun.build` bundle,
+  must print the same output.
+- **JSON paths** (`tests/json.test.ts`): typed and untyped paths into `jsonb` and `json` columns,
+  nulls and missing keys, array elements, grouping and ordering by a path.
 - **Compiler and types** (`tests/compiler.test.ts`, `tests/types.test.ts`).
 - **Model** (`tests/model.test.ts`, `tests/models.ts`): `Model.Class` entities configured with the
   builder; two generations of migrations generated from the model and run by `PgMigrator`; the
@@ -628,8 +715,12 @@ Known gaps, roughly in the order they would matter:
 - **Update lambdas are checked for unknown columns when they run,** not by the type checker.
 - **`include` is one level**, by name. For filtered or nested loading, use `select`.
 - **`groupBy` must be followed by `select`**; groups cannot be materialized as arrays.
-- **JSON columns** are read whole; there is no path navigation inside lambdas.
+- **JSON paths read what is stored.** A schema that transforms values inside a JSON column (a
+  date kept as a string) is not applied to a value selected by path. There are no containment
+  (`@>`) or key-existence operators, no `some`/`includes` over a JSON array, and an update
+  cannot set one key or build JSON from other columns.
 - **No streaming**, no compiled-query cache (translation is cheap, but it is done every time).
 - Without `strict`, an unsupported construct is a build warning plus an error when the lambda is
   used, because the plugin cannot tell a query lambda from a lookalike.
-- Built against Effect 4.1's SQL modules and checked with TypeScript 7 only.
+- Built against Effect 4.1's SQL modules (the tests pass on 4.1.0 and 4.1.4) and checked with
+  TypeScript 7 only.

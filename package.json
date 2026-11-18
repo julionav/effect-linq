@@ -1,17 +1,36 @@
 {
-  "name": "effect-linq",
-  "version": "0.0.0",
+  "name": "@blitz/effect-linq",
+  "version": "0.2.0",
   "description": "LINQ to SQL for TypeScript: typed, composable Postgres queries written as plain lambdas, compiled at build time, on top of Effect SQL.",
+  "keywords": [
+    "change-tracking",
+    "effect",
+    "entity-framework",
+    "linq",
+    "migrations",
+    "orm",
+    "postgres",
+    "query-builder",
+    "sql"
+  ],
   "license": "MIT",
+  "author": "Julio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/julionav/effect-linq.git"
+  },
   "files": [
     "dist"
   ],
   "type": "module",
   "sideEffects": [
-    "./dist/register.mjs"
+    "./dist/register.mjs",
+    "./dist/bun/register.mjs"
   ],
   "exports": {
     ".": "./dist/index.mjs",
+    "./bun": "./dist/bun.mjs",
+    "./bun/register": "./dist/bun/register.mjs",
     "./compiler": "./dist/compiler.mjs",
     "./register": "./dist/register.mjs",
     "./vite": "./dist/vite.mjs",
@@ -48,7 +67,7 @@
     "vite-plus": "^1.6.0"
   },
   "peerDependencies": {
-    "effect": "^4.1.4"
+    "effect": "^4.1.0"
   },
   "overrides": {
     "vite": "npm:@voidzero-dev/vite-plus-core@1.6.0"
@@ -59,5 +78,8 @@
       "version": "1.4.4",
       "onFail": "download"
     }
+  },
+  "engines": {
+    "node": ">=22.15"
   }
 }

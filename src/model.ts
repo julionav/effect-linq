@@ -199,7 +199,7 @@ export class EntityBuilder<M extends Model.Any, R = {}> {
         ((on as any)[QuoteSymbol] as Quote | undefined) ??
         fail(
           `relation "${name}": the lambda was not compiled to an expression tree. ` +
-            "Add the effect-linq plugin to your build, or run Node with --import effect-linq/register",
+            "Add the effect-linq plugin to your build, or run Node with --import @blitz/effect-linq/register",
         );
     } else {
       spec = on as ForeignKey<string>;

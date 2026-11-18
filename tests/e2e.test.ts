@@ -20,9 +20,9 @@ const exec = (command: string, args: Array<string>, cwd: string): string =>
 describe("built package", () => {
   beforeAll(() => {
     exec(vp, ["pack"], root);
-    if (!existsSync(join(example, "node_modules/effect-linq"))) {
-      mkdirSync(join(example, "node_modules"), { recursive: true });
-      symlinkSync(root, join(example, "node_modules/effect-linq"), "dir");
+    if (!existsSync(join(example, "node_modules/@blitz/effect-linq"))) {
+      mkdirSync(join(example, "node_modules/@blitz"), { recursive: true });
+      symlinkSync(root, join(example, "node_modules/@blitz/effect-linq"), "dir");
     }
     exec(vp, ["pack"], example);
   }, 120_000);
@@ -59,8 +59,53 @@ describe("built package", () => {
 
   test("the Node loader hook runs the same program from TypeScript source", () => {
     const built = exec("node", ["dist/main.mjs"], example);
-    const hooked = exec("node", ["--import", "effect-linq/register", "src/main.ts"], example);
+    const hooked = exec(
+      "node",
+      ["--import", "@blitz/effect-linq/register", "src/main.ts"],
+      example,
+    );
     expect(hooked).toBe(built);
+  });
+
+  test("the Bun plugin runs the same program from TypeScript source", () => {
+    const built = exec("node", ["dist/main.mjs"], example);
+    const preloaded = exec(
+      "bun",
+      ["--preload", "@blitz/effect-linq/bun/register", "src/main.ts"],
+      example,
+    );
+    expect(preloaded).toBe(built);
+  });
+
+  test("a bundle made by Bun.build with the plugin runs without it", () => {
+    const built = exec("node", ["dist/main.mjs"], example);
+    exec("bun", ["build.bun.ts"], example);
+    const bundle = readFileSync(join(example, "dist-bun/main.js"), "utf8");
+    expect(bundle.includes("oxc-parser")).toBe(false);
+    expect(exec("bun", ["dist-bun/main.js"], example)).toBe(built);
+  });
+
+  test("the Bun plugin transforms the files it is told to and passes the rest through", async () => {
+    const { linq } = await import("../src/bun.ts");
+    const loaders: Array<{
+      filter: RegExp;
+      load: (args: { path: string }) => { contents: string; loader: string };
+    }> = [];
+    linq({ exclude: /schema\.ts$/ }).setup({
+      onLoad: (constraints, load) => loaders.push({ filter: constraints.filter, load }),
+    });
+    const [{ filter, load }] = loaders as [(typeof loaders)[number]];
+    const main = join(example, "src/main.ts");
+    const schema = join(example, "src/schema.ts");
+    expect(filter.test(main)).toBe(true);
+    expect(filter.test(join(example, "package.json"))).toBe(false);
+    expect(load({ path: main })).toMatchObject({ loader: "ts" });
+    expect(load({ path: main }).contents).toContain("__linq_q(");
+    // excluded: handed back as it is
+    expect(load({ path: schema }).contents).toBe(readFileSync(schema, "utf8"));
+    // nothing to compile: handed back as it is
+    const config = join(example, "vite.config.ts");
+    expect(load({ path: config }).contents).toBe(readFileSync(config, "utf8"));
   });
 
   test("without the plugin, the failure is immediate and explains itself", () => {

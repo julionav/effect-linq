@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { compile } from "../src/compiler.ts";
+import { compile, DEFAULT_FUNCTIONS, DEFAULT_METHODS, mayContainSite } from "../src/compiler.ts";
 import type { LambdaAst } from "../src/ir.ts";
 import { linq } from "../src/vite.ts";
 
@@ -384,5 +384,59 @@ describe("review findings", () => {
     expect(compile(`export const out = q.where((u) => u.a)`, "/home/me/f.ts")!.asts[0]!.loc).toBe(
       "f.ts:1:28",
     );
+  });
+});
+
+describe("the text check that decides whether a file is parsed", () => {
+  const methods = new Set(DEFAULT_METHODS);
+  const functions = new Set(DEFAULT_FUNCTIONS);
+  const may = (code: string) => mayContainSite(code, methods, functions);
+
+  test("files without a possible query lambda are skipped", () => {
+    for (const code of [
+      `const total = Math.max(a, b) + items.join(", ")`,
+      `await Promise.all([load(1), load(2)])`,
+      `const where = 1; wherever(x => x)`,
+      `list.count(/* (u) => u */ 3)`,
+      "const name = `${a.join(b)}`",
+      `const n = 1; list.first(n)`,
+      `rows.map((row) => row.id)`,
+      `unquote((u) => u.a)`,
+      `x.quote((u) => u.a)`,
+    ]) {
+      expect(may(code), code).toBe(false);
+    }
+  });
+
+  test("anything that may hold one is parsed", () => {
+    for (const code of [
+      `q.where((u) => u.a)`,
+      `q . where ( u => u.a )`,
+      `q?.where(function (u) { return u.a })`,
+      `q.where<User>(isAdult)`,
+      `const isAdult = (u) => u.age > 17; q.where(isAdult)`,
+      `const isAdult: Pred = make(); q.where(isAdult as any)`,
+      `q.join(other, (a) => a.id, (b) => b.id)`,
+      `q.select((u) => ({ n: \`\${u.a}\` }))`,
+      "q.where(`x${(u) => u}`)",
+      `q.count(a / b)`,
+      `quote((u) => u.a)`,
+      `q.where("(" , (u) => u.a)`,
+      `q.where(`,
+    ]) {
+      expect(may(code), code).toBe(true);
+    }
+  });
+
+  test("skipped files and parsed files compile to the same result", () => {
+    // every site the compiler finds is in a file the text check lets through
+    const sources = [
+      `const f = async (u) => u; q.where(f)`,
+      `export const big = (u) => u.age > 1e3; q.where(big)`,
+      `q.orderBy((u) => u.a).thenBy((u) => u.b)`,
+    ];
+    for (const source of sources) {
+      if (compile(source, "/f.ts") !== null) expect(may(source), source).toBe(true);
+    }
   });
 });

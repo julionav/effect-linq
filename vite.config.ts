@@ -4,7 +4,14 @@ import { linq } from "./src/vite.ts";
 export default defineConfig({
   plugins: [linq()],
   pack: {
-    entry: ["src/index.ts", "src/vite.ts", "src/compiler.ts", "src/register.ts"],
+    entry: {
+      index: "src/index.ts",
+      vite: "src/vite.ts",
+      compiler: "src/compiler.ts",
+      register: "src/register.ts",
+      bun: "src/bun.ts",
+      "bun/register": "src/bun-register.ts",
+    },
     dts: true,
     exports: true,
   },

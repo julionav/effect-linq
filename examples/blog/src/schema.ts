@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 import { Model } from "effect/schema";
-import { DbContext, entity } from "effect-linq";
+import { DbContext, entity } from "@blitz/effect-linq";
 
 export class User extends Model.Class<User>("User")({
   id: Model.GeneratedByDb(Schema.Number),

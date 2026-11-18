@@ -11,7 +11,7 @@
 //   bunx strobe bench perf/linq.bench.ts --base <git ref> --head .              did a change help?
 //
 // Needs the test database (see README). Lambdas are compiled by the loader hook, as in
-// `node --import effect-linq/register`.
+// `node --import @blitz/effect-linq/register`.
 import { bench, script } from "@hona/strobe";
 
 const node = {

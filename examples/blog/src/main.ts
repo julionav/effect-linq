@@ -1,11 +1,11 @@
 /**
  * A small program that exercises the library the way an application would.
  * It is built with `vp pack` (minified) and also run directly by Node with
- * `--import effect-linq/register`; both must print the same thing.
+ * `--import @blitz/effect-linq/register`; both must print the same thing.
  */
 import { PgClient } from "@effect/sql-pg";
 import { Effect, Layer, Redacted } from "effect";
-import { quote } from "effect-linq";
+import { quote } from "@blitz/effect-linq";
 import { BlogDb } from "./schema.ts";
 
 const url = process.env.LINQ_TEST_DATABASE_URL ?? "postgres://postgres:linq@localhost:54871/linq";

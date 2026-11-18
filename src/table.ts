@@ -187,7 +187,7 @@ export interface TableOptions<F, D extends keyof F = never> {
 export const snakeCase = (key: string): string =>
   key.replace(/[A-Z]/g, (letter, index: number) => (index === 0 ? "" : "_") + letter.toLowerCase());
 
-const classify = (ast: any): JsType => {
+export const classify = (ast: any): JsType => {
   switch (ast._tag) {
     case "String":
     case "TemplateLiteral":
@@ -236,6 +236,18 @@ const classify = (ast: any): JsType => {
     default:
       return "unknown";
   }
+};
+
+const storedAsts = new WeakMap<Column, unknown>();
+
+/** The schema of what a column stores, which is what JSON paths navigate. */
+export const storedAst = (col: Column): unknown => {
+  let ast = storedAsts.get(col);
+  if (ast === undefined) {
+    ast = (Schema.toEncoded(col.schema as any) as Schema.Top).ast;
+    storedAsts.set(col, ast);
+  }
+  return ast;
 };
 
 const elementOf = (ast: any): JsType | undefined => {

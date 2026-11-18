@@ -2,7 +2,7 @@
  * Compiles query lambdas when modules are loaded by Node itself, for scripts
  * and servers that run without a bundler:
  *
- *     node --import effect-linq/register app.ts
+ *     node --import @blitz/effect-linq/register app.ts
  */
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";

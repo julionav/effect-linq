@@ -5,6 +5,6 @@
   "scripts": {
     "build": "vp pack",
     "start": "node dist/main.mjs",
-    "dev": "node --import effect-linq/register src/main.ts"
+    "dev": "node --import @blitz/effect-linq/register src/main.ts"
   }
 }

@@ -1,4 +1,4 @@
-import { linq } from "effect-linq/vite";
+import { linq } from "@blitz/effect-linq/vite";
 import { defineConfig } from "vite-plus";
 
 export default defineConfig({

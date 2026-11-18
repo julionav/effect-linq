@@ -9,3 +9,4 @@ dist
 !.env.example
 bench/wasm/*.wasm
 tests/.migrations
+dist-bun

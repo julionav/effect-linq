@@ -203,7 +203,7 @@ const quoteOf = (fn: unknown, operator: string): Quote => {
       typeof fn === "function"
         ? `The function passed to ${operator}() was not compiled to an expression tree. ` +
             "Add the effect-linq plugin to your build (Vite, Vitest, Rolldown or tsdown) or run " +
-            "Node with --import effect-linq/register, and pass the lambda inline or wrap it in " +
+            "Node with --import @blitz/effect-linq/register, and pass the lambda inline or wrap it in " +
             "quote(). Function: " +
             String(fn).slice(0, 120)
         : `${operator}() expects a function`,
