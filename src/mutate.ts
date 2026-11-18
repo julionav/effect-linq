@@ -23,7 +23,11 @@ import {
 export type Values = { readonly fn: Callable } | { readonly value: unknown };
 
 /** `undefined`: return the number of affected rows. `fn: undefined`: the whole row. */
-export type Returning = { readonly fn: Callable | undefined } | undefined;
+export type Returning =
+  | { readonly fn: Callable | undefined }
+  /** only these columns: what a session needs back from an insert */
+  | { readonly columns: ReadonlyArray<Column> }
+  | undefined;
 
 export interface Conflict {
   /** property names of the columns of the unique constraint */
@@ -38,9 +42,14 @@ export interface WriteOptions {
 }
 
 /** A plain value as a bind parameter of the column's type. */
-export const bind = (col: Column, value: unknown, typed = true): Frag => {
-  // SchemaError propagates: the caller turns it into a typed failure
-  const encoded = col.write(value);
+export const bind = (col: Column, value: unknown, typed = true, validated = false): Frag => {
+  // SchemaError propagates: the caller turns it into a typed failure.
+  // A value its model already validated only needs encoding, if anything.
+  const encoded = validated
+    ? col.encode === undefined || value === null
+      ? value
+      : col.encode(value)
+    : col.write(value);
   if (encoded === null || encoded === undefined) return "NULL";
   // `typed: false` where the context gives the parameter the column's own type
   if (col.wire === "json") return new Param(JSON.stringify(encoded), typed ? "jsonb" : undefined);
@@ -125,16 +134,19 @@ const finish = (
   single: boolean,
 ): Plan => {
   if (returning === undefined) {
-    const compiled = compileFrag([
-      "WITH m AS (",
-      statement,
-      " RETURNING 1) SELECT count(*)::int FROM m",
-    ]);
-    return { ...compiled, read: (rows) => rows[0]![0] };
+    return { ...compileFrag(statement), count: true, read: () => 0 };
   }
   const joins = target.owner.joins.length;
   const columns: Array<Frag> = [];
-  const shape = returning.fn === undefined ? target : t.apply(returning.fn, [target]);
+  const shape: Sym =
+    "columns" in returning
+      ? {
+          k: "object",
+          props: new Map(returning.columns.map((col) => [col.key, t.member(target, col.key)])),
+        }
+      : returning.fn === undefined
+        ? target
+        : t.apply(returning.fn, [target]);
   const reader = t.plan(shape, columns, false);
   if (target.owner.joins.length !== joins) {
     fail(
@@ -166,6 +178,8 @@ export const compileInsert = (
   conflict: Conflict | undefined,
   returning: Returning,
   single: boolean,
+  /** the rows went through the model's insert variant already */
+  validated = false,
 ): Plan => {
   const table = source.table;
   if (source.ops.length > 0) fail("insert() must be called on a table, not on a query");
@@ -208,7 +222,7 @@ export const compileInsert = (
             if (value === undefined) return "DEFAULT";
             // a SQL expression such as Sql.now()
             if (value instanceof Deferred) return t.scalar(t.captured(value)).sql;
-            return bind(col, value);
+            return bind(col, value, true, validated);
           }),
           ", ",
         ),

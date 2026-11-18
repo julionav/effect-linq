@@ -511,14 +511,12 @@ const chunks = <A>(items: ReadonlyArray<A>, size: number): Array<ReadonlyArray<A
   return out;
 };
 
-const counted = (statement: Frag): Plan => {
-  const compiled = compileFrag([
-    "WITH m AS (",
-    statement,
-    " RETURNING 1) SELECT count(*)::int FROM m",
-  ]);
-  return { ...compiled, read: (rows) => rows[0]![0] };
-};
+/** A statement whose result is the number of rows it affected. */
+const counted = (statement: Frag): Plan => ({
+  ...compileFrag(statement),
+  count: true,
+  read: () => 0,
+});
 
 const one = (table: AnyTable): bigint | number => (table.version?.type === "bigint" ? 1n : 1);
 
@@ -957,12 +955,21 @@ export class Session<Env = SqlClient> {
       const table = store.table;
       const source = { table, rels: undefined, ops: [] };
       for (const batch of chunks(pending, insertBatchSize(table))) {
+        // Only what the database decided has to come back: the key, and the
+        // columns some row left for it to fill in.
+        const needed = table.columnList.filter(
+          (col) =>
+            table.primaryKey.includes(col) ||
+            col === table.version ||
+            batch.some((item) => item.entity[col.key] === undefined),
+        );
         const plan = compileInsert(
           source,
           batch.map((item) => item.entity),
           undefined,
-          { fn: undefined },
+          { columns: needed },
           false,
+          table.model !== undefined,
         );
         statements.push({
           plan,

@@ -2151,6 +2151,8 @@ export interface Plan {
   readonly params: ReadonlyArray<unknown>;
   /** Builds the result from the rows returned by the driver (as arrays). */
   readonly read: (rows: ReadonlyArray<ReadonlyArray<unknown>>) => unknown;
+  /** The result is the number of rows the statement affected, which the driver reports. */
+  readonly count?: boolean;
 }
 
 const terminalArg = (arg: Callable | { readonly value: unknown }): Sym =>

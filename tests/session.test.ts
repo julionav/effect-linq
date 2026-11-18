@@ -78,9 +78,9 @@ describe("tracking", () => {
     );
     expect(sent.length).toBe(2);
     expect(sent[1]).toBe(
-      'WITH m AS (UPDATE "linq_test"."s_authors" AS t SET "name" = v."n0", "age" = v."n1" FROM (VALUES ' +
+      'UPDATE "linq_test"."s_authors" AS t SET "name" = v."n0", "age" = v."n1" FROM (VALUES ' +
         '((NULL::"linq_test"."s_authors")."id", (NULL::"linq_test"."s_authors")."name", (NULL::"linq_test"."s_authors")."age"), ' +
-        '($1, $2, $3)) AS v ("k0", "n0", "n1") WHERE t."id" = v."k0" RETURNING 1) SELECT count(*)::int FROM m',
+        '($1, $2, $3)) AS v ("k0", "n0", "n1") WHERE t."id" = v."k0"',
     );
     expect(await run(authors.select((a) => [a.name, a.age, a.balance]))).toEqual([
       ["Ada Lovelace", 37, 100],

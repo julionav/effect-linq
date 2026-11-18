@@ -261,6 +261,18 @@ export const runPlan = <A>(compile: () => Plan): QueryEffect<A> =>
       // a value that does not match its column's schema is a typed failure
       return Schema.isSchemaError(error) ? Effect.fail(error) : Effect.die(error);
     }
+    if (plan.count) {
+      // a write that returns nothing: the count is in the driver's command result
+      return SqlClient.use((sql) =>
+        Effect.map(sql.unsafe(plan.sql, plan.params as Array<unknown>).raw, (result) => {
+          const count = (result as { readonly rowCount?: unknown } | null)?.rowCount;
+          if (typeof count !== "number") {
+            throw new LinqError("the driver did not report how many rows the statement affected");
+          }
+          return count as A;
+        }),
+      );
+    }
     return SqlClient.use((sql) =>
       Effect.flatMap(
         sql.unsafe(plan.sql, plan.params as Array<unknown>).values,
@@ -348,8 +360,8 @@ const insertRows = (
   conflict: Conflict | undefined,
   single: boolean,
 ): any => {
-  const compile = (returning: Returning, batch = rows) =>
-    compileInsert(source, batch, conflict, returning, single);
+  const compile = (returning: Returning, batch = rows, validated = false) =>
+    compileInsert(source, batch, conflict, returning, single, validated);
   const model = source.table.model;
   const run = (returning: Returning): QueryEffect<unknown> =>
     model === undefined
@@ -357,11 +369,16 @@ const insertRows = (
       : // the model fills in what the application generates (ids, timestamps) and validates
         Effect.flatMap(
           Effect.forEach(rows, (row) => model.makeInsert(row)),
-          (made) => insert(returning, made),
+          (made) => insert(returning, made, true),
         );
-  const insert = (returning: Returning, rows: ReadonlyArray<unknown>): QueryEffect<unknown> => {
+  const insert = (
+    returning: Returning,
+    rows: ReadonlyArray<unknown>,
+    validated = false,
+  ): QueryEffect<unknown> => {
     const size = insertBatchSize(source.table);
-    const one = (batch: ReadonlyArray<unknown>) => runPlan<any>(() => compile(returning, batch));
+    const one = (batch: ReadonlyArray<unknown>) =>
+      runPlan<any>(() => compile(returning, batch, validated));
     if (rows.length === 0) return Effect.succeed(returning === undefined ? 0 : []);
     if (rows.length <= size) return one(rows);
     // too many bind parameters for one statement: several, atomically

@@ -67,8 +67,8 @@ describe("insert", () => {
     ]);
     expect(insert.toSql()).toEqual({
       sql:
-        'WITH m AS (INSERT INTO "linq_test"."w_authors" AS "t0" ("name", "email", "balance", "active") ' +
-        "VALUES ($1, $2, $3, DEFAULT), ($4, $5, DEFAULT, $6) RETURNING 1) SELECT count(*)::int FROM m",
+        'INSERT INTO "linq_test"."w_authors" AS "t0" ("name", "email", "balance", "active") ' +
+        "VALUES ($1, $2, $3, DEFAULT), ($4, $5, DEFAULT, $6)",
       params: ["Ada", "ada@example.com", "12.5", "Grace", "grace@example.com", false],
     });
     expect(await run(insert)).toBe(2);
@@ -252,8 +252,8 @@ describe("executeUpdate", () => {
       .executeUpdate({ name: "Grace H.", balance: 7.25, age: null, email: undefined });
     expect(update.toSql()).toEqual({
       sql:
-        'WITH m AS (UPDATE "linq_test"."w_authors" AS "t0" SET "name" = $1, "balance" = $2, "age" = NULL ' +
-        'WHERE ("t0"."id" = $3) RETURNING 1) SELECT count(*)::int FROM m',
+        'UPDATE "linq_test"."w_authors" AS "t0" SET "name" = $1, "balance" = $2, "age" = NULL ' +
+        'WHERE ("t0"."id" = $3)',
       params: ["Grace H.", "7.25", 2],
     });
     expect(await run(update)).toBe(1);
@@ -320,11 +320,11 @@ describe("executeUpdate", () => {
       .where((b) => b.author.active && b.author.name.startsWith("A"))
       .executeUpdate((b) => ({ title: `${b.author.name}: ${b.title}`, views: 0n }));
     expect(update.toSql().sql).toBe(
-      'WITH m AS (UPDATE "linq_test"."w_books" AS "u2" SET "title" = "s3"."c1", "views" = $1 FROM (' +
+      'UPDATE "linq_test"."w_books" AS "u2" SET "title" = "s3"."c1", "views" = $1 FROM (' +
         'SELECT "t0"."id" AS "c0", ("t1"."name" || $2::text || "t0"."title") AS "c1" FROM "linq_test"."w_books" AS "t0" ' +
         'LEFT JOIN "linq_test"."w_authors" AS "t1" ON ("t0"."author_id" = "t1"."id") ' +
         'WHERE ("t1"."active" AND ("t1"."name" LIKE $3))) AS "s3" ' +
-        'WHERE "u2"."id" = "s3"."c0" RETURNING 1) SELECT count(*)::int FROM m',
+        'WHERE "u2"."id" = "s3"."c0"',
     );
     expect(await run(update)).toBe(2);
     expect(await run(books.select((b) => [b.title, b.views]))).toEqual([
@@ -437,9 +437,7 @@ describe("executeDelete", () => {
   test("deletes the rows of the query and returns the count", async () => {
     const remove = wdb.books.where((b) => b.views >= 20n).executeDelete();
     expect(remove.toSql()).toEqual({
-      sql:
-        'WITH m AS (DELETE FROM "linq_test"."w_books" AS "t0" WHERE ("t0"."views" >= $1) RETURNING 1) ' +
-        "SELECT count(*)::int FROM m",
+      sql: 'DELETE FROM "linq_test"."w_books" AS "t0" WHERE ("t0"."views" >= $1)',
       params: [20n],
     });
     expect(await run(remove)).toBe(2);
@@ -490,9 +488,9 @@ describe("executeDelete", () => {
       .take(2)
       .executeDelete();
     expect(remove.toSql().sql).toBe(
-      'WITH m AS (DELETE FROM "linq_test"."w_stock" AS "d1" WHERE ("d1"."warehouse", "d1"."sku") IN (' +
+      'DELETE FROM "linq_test"."w_stock" AS "d1" WHERE ("d1"."warehouse", "d1"."sku") IN (' +
         'SELECT "t0"."warehouse" AS "c0", "t0"."sku" AS "c1" FROM "linq_test"."w_stock" AS "t0" ' +
-        'ORDER BY "t0"."qty" LIMIT 2) RETURNING 1) SELECT count(*)::int FROM m',
+        'ORDER BY "t0"."qty" LIMIT 2)',
     );
     expect(await run(remove)).toBe(2);
     expect(await run(wdb.stock.select((s) => s.qty))).toEqual([5]);

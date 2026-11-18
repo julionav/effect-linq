@@ -549,40 +549,45 @@ bunx strobe bench perf/linq.bench.ts --base main --head .   # did a change help?
 ```
 
 Results on an Apple M4 Max, macOS, Postgres 17 in Docker on the same machine, Node 22. Each
-figure is one measured run, which repeats the journey as noted. The machine was not quiet: strobe
-warned of background load and of 12–31% variance between launches, and two comparisons did not
-reach a verdict. Read the intervals, not the medians.
+figure is one measured run, which repeats the journey as noted. The machine was not quiet (strobe
+warned of 26–32% background CPU load), and several comparisons did not reach a verdict. Read the
+intervals, not the medians.
 
 **What the library adds** (raw → statements):
 
-| Journey                       | raw     | statements | Run time                            | CPU time |
-| ----------------------------- | ------- | ---------- | ----------------------------------- | -------- |
-| 30 queries of 1,000 rows      | 28.8 ms | 37.0 ms    | not decided (−10% to +44%)          | +6%      |
-| 4 queries of 10,000 rows      | 34.5 ms | 35.8 ms    | +4% (+0.3% to +7%), slightly slower | −1%      |
-| 5× load 100 rows, update each | 41.4 ms | 55.1 ms    | +34% (+9% to +66%), slower          | +142%    |
-| 4× insert 1,000 rows          | 33.3 ms | 40.4 ms    | +22% (+3% to +46%), slower          | +22%     |
+| Journey                       | raw     | statements | Run time                          | CPU time            |
+| ----------------------------- | ------- | ---------- | --------------------------------- | ------------------- |
+| 30 queries of 1,000 rows      | 29.7 ms | 28.8 ms    | not decided (−10% to +2%)         | +6% (+2% to +9%)    |
+| 4 queries of 10,000 rows      | 36.0 ms | 36.6 ms    | not decided (−5% to +70%)         | −6% (−10% to 0%)    |
+| 5× load 100 rows, update each | 43.5 ms | 45.2 ms    | +4% (+1% to +9%), slightly slower | +26% (+22% to +30%) |
+| 4× insert 1,000 rows          | 33.0 ms | 31.6 ms    | not decided (−10% to +16%)        | 0% (−16% to +28%)   |
 
-Reads cost about the same as hand-written SQL: the CPU difference is within a few percent either
-way. Writes cost more: every value is validated and encoded by the model, and each
-`executeUpdate` is translated when it runs.
+Reads and inserts cost about the same as hand-written SQL. A statement per row costs a quarter
+more CPU, because each `executeUpdate` is translated when it runs; that is 4% of the wall time,
+which the database dominates.
 
 **What change tracking adds** (statements → session):
 
-| Journey                       | statements | session | Run time                    | CPU time |
-| ----------------------------- | ---------- | ------- | --------------------------- | -------- |
-| 30 queries of 1,000 rows      | 38.1 ms    | 48.6 ms | not decided (−2% to +27%)   | +18%     |
-| 4 queries of 10,000 rows      | 34.7 ms    | 41.9 ms | +20% (+5% to +27%), slower  | +33%     |
-| 5× load 100 rows, update each | 47.3 ms    | 21.4 ms | −59% (−76% to −40%), faster | −68%     |
-| 4× insert 1,000 rows          | 42.1 ms    | 50.0 ms | +19% (+2% to +44%), slower  | +92%     |
+| Journey                       | statements | session | Run time                    | CPU time            |
+| ----------------------------- | ---------- | ------- | --------------------------- | ------------------- |
+| 30 queries of 1,000 rows      | 31.0 ms    | 39.4 ms | +23% (+6% to +42%), slower  | +13% (+10% to +16%) |
+| 4 queries of 10,000 rows      | 42.9 ms    | 48.0 ms | +12% (+2% to +17%), slower  | +33% (+25% to +44%) |
+| 5× load 100 rows, update each | 45.6 ms    | 19.7 ms | −58% (−66% to −49%), faster | −36% (−62% to −30%) |
+| 4× insert 1,000 rows          | 32.6 ms    | 39.6 ms | +23% (+1% to +49%), slower  | +75% (+66% to +86%) |
 
-Tracking makes reads slower, by a fifth or so of CPU on small results and a third on large ones,
-and pays for itself when many rows are edited to different values: one batched `UPDATE` instead
-of a hundred. Inserting through a session is slower than `insert([...])`, because it returns and
-tracks every inserted row. When one expression describes the change, a single set-based
-`executeUpdate` beats both and needs no read.
+Tracking makes reads slower and pays for itself when many rows are edited to different values:
+one batched `UPDATE` instead of a hundred. Inserting through a session is slower than
+`insert([...])`, because it gets back and tracks every inserted row. When one expression
+describes the change, a single set-based `executeUpdate` beats both and needs no read.
 
 Looking for changes among 10,000 tracked rows takes about 64 µs (12.9 ms for 200 scans, 12.6 to
 13.0 ms across six launches), roughly 6 ns per row.
+
+Strobe also referees changes to the library itself. The last round of optimisation, measured
+with `--base HEAD --head .`: a statement per row became 24% faster (−36% to −6%; CPU −69%) by
+taking the affected-row count from the driver instead of wrapping each write in a counting
+query, and session inserts 8% faster (−16% to −1%; CPU −13%) by fetching back only the columns
+the database filled in. No other journey moved.
 
 `bun run bench:experiments` runs the two design experiments described under
 [How it is fast](#how-it-is-fast) (proxies, and Rust compiled to WebAssembly).
