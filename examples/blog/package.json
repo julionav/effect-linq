@@ -1,0 +1,10 @@
+{
+  "name": "effect-linq-example-blog",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vp pack",
+    "start": "node dist/main.mjs",
+    "dev": "node --import effect-linq/register src/main.ts"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "effect-linq",
+  "version": "0.0.0",
+  "description": "LINQ to SQL for TypeScript: typed, composable Postgres queries written as plain lambdas, compiled at build time, on top of Effect SQL.",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "./dist/register.mjs"
+  ],
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./compiler": "./dist/compiler.mjs",
+    "./register": "./dist/register.mjs",
+    "./vite": "./dist/vite.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack",
+    "dev": "vp pack --watch",
+    "test": "vp test",
+    "check": "vp check",
+    "typecheck": "tsc --noEmit",
+    "bench": "strobe bench perf/linq.bench.ts --base statements --head session",
+    "prepublishOnly": "vp run build",
+    "bench:overhead": "strobe bench perf/linq.bench.ts --base raw --head statements",
+    "bench:check": "strobe bench perf/linq.bench.ts --check --head .",
+    "bench:experiments": "node --expose-gc --import ./src/register.ts bench/tracking.ts"
+  },
+  "dependencies": {
+    "magic-string": "^1.4.5",
+    "oxc-parser": "^0.158.0"
+  },
+  "devDependencies": {
+    "@effect/sql-pg": "4.1.4",
+    "@effect/vitest": "^4.1.4",
+    "@hona/strobe": "^0.44.0",
+    "@types/node": "^26.6.5",
+    "effect": "4.1.4",
+    "typescript": "^7.0.2",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.6.0",
+    "vite-plus": "^1.6.0"
+  },
+  "peerDependencies": {
+    "effect": "^4.1.4"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.6.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "bun",
+      "version": "1.4.4",
+      "onFail": "download"
+    }
+  }
+}
